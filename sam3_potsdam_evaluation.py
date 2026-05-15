@@ -9,6 +9,7 @@ SAM3 零样本评估 - Potsdam 数据集
 
 import os
 import json
+import argparse
 import numpy as np
 import torch
 from PIL import Image
@@ -42,9 +43,11 @@ except ImportError:
 class PotsdamSAM3Evaluator:
     """SAM3 零样本评估器 - Potsdam 数据集"""
 
+    IGNORE_INDEX = 255
+
     # Potsdam 类别定义
     CLASS_INFO = {
-        0: {"name": " clutter/background", "prompt": "background clutter", "color": [255, 255, 255]},
+        0: {"name": "clutter/background", "prompt": "background clutter", "color": [255, 255, 255]},
         1: {"name": "impervious surface", "prompt": "impervious surface", "color": [0, 0, 0]},
         2: {"name": "building", "prompt": "building", "color": [0, 0, 255]},
         3: {"name": "low vegetation", "prompt": "low vegetation", "color": [0, 255, 255]},
@@ -52,12 +55,24 @@ class PotsdamSAM3Evaluator:
         5: {"name": "car", "prompt": "car", "color": [255, 255, 0]}
     }
 
+    COLOR_TO_CLASS = {
+        (255, 255, 255): 0,     # clutter/background
+        (0, 0, 0): 1,           # impervious surface
+        (0, 0, 255): 2,         # building
+        (0, 255, 255): 3,       # low vegetation
+        (0, 255, 0): 4,         # tree
+        (255, 255, 0): 5,       # car
+        (255, 0, 0): IGNORE_INDEX
+    }
+
     # 配置参数
     PATCH_SIZE = 1008  # SAM3 输入尺寸
     STRIDE = 672       # 切片步长（适当重叠）
     SCORE_THRESHOLD = 0.5  # mask 置信度阈值
 
-    def __init__(self, base_dir, output_dir="results", checkpoint_path=None):
+    def __init__(self, base_dir, output_dir="results", checkpoint_path=None,
+                 patch_size=None, stride=None, score_threshold=None,
+                 class_info=None):
         """
         初始化评估器
 
@@ -69,6 +84,10 @@ class PotsdamSAM3Evaluator:
         self.base_dir = Path(base_dir)
         self.output_dir = Path(output_dir)
         self.checkpoint_path = checkpoint_path
+        self.class_info = class_info or self.CLASS_INFO
+        self.PATCH_SIZE = patch_size or self.PATCH_SIZE
+        self.STRIDE = stride or self.STRIDE
+        self.SCORE_THRESHOLD = score_threshold if score_threshold is not None else self.SCORE_THRESHOLD
 
         # 创建输出目录
         self.output_dir.mkdir(exist_ok=True, parents=True)
@@ -82,26 +101,30 @@ class PotsdamSAM3Evaluator:
         self.processor = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
+        # 设置日志（必须在加载模型之前）
+        self._setup_logging()
+
         if SAM3_AVAILABLE:
             self._load_sam3_model()
-
-        # 设置日志
-        self._setup_logging()
 
     def _setup_logging(self):
         """设置日志记录"""
         log_file = self.output_dir / "logs" / f"evaluation_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
 
         import logging
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(log_file),
-                logging.StreamHandler()
-            ]
-        )
         self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.INFO)
+        self.logger.propagate = False
+        self.logger.handlers.clear()
+
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(formatter)
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
+        self.logger.addHandler(file_handler)
+        self.logger.addHandler(stream_handler)
+
         self.logger.info(f"SAM3 零样本评估开始 - 设备: {self.device}")
 
     def _load_sam3_model(self):
@@ -161,16 +184,56 @@ class PotsdamSAM3Evaluator:
         return image
 
     def read_label(self, label_path):
-        """读取标签文件"""
+        """读取标签文件并转换为类别ID"""
         label_path = Path(label_path)
 
         if GDAL_AVAILABLE:
             dataset = gdal.Open(str(label_path))
-            label = dataset.ReadAsArray()
+            if dataset is None:
+                raise FileNotFoundError(f"无法打开标签文件: {label_path}")
+            label_rgb = dataset.ReadAsArray()
             dataset = None
+
+            # 如果是(C,H,W)格式，转换为(H,W,C)
+            if len(label_rgb.shape) == 3 and label_rgb.shape[0] in (3, 4):
+                label_rgb = np.transpose(label_rgb, (1, 2, 0))
         else:
-            label = Image.open(label_path)
-            label = np.array(label)
+            label_rgb = Image.open(label_path)
+            label_rgb = np.array(label_rgb)
+
+        if label_rgb.ndim == 3 and label_rgb.shape[-1] == 4:
+            label_rgb = label_rgb[:, :, :3]
+
+        # 检查是否为RGB格式
+        if label_rgb.ndim == 3 and label_rgb.shape[-1] == 3:
+            # 转换RGB到类别ID
+            h, w = label_rgb.shape[:2]
+            label = np.full((h, w), self.IGNORE_INDEX, dtype=np.uint8)
+
+            for color, class_id in self.COLOR_TO_CLASS.items():
+                mask = (label_rgb[:, :, 0] == color[0]) & \
+                       (label_rgb[:, :, 1] == color[1]) & \
+                       (label_rgb[:, :, 2] == color[2])
+                label[mask] = class_id
+
+            unknown_mask = label == self.IGNORE_INDEX
+            known_ignore = (
+                (label_rgb[:, :, 0] == 255) &
+                (label_rgb[:, :, 1] == 0) &
+                (label_rgb[:, :, 2] == 0)
+            )
+            unknown_count = int(np.sum(unknown_mask & ~known_ignore))
+            if unknown_count > 0:
+                self.logger.warning(f"发现 {unknown_count} 个未知颜色标签像素，已按 ignore 处理")
+
+            self.logger.info(f"RGB标签已转换为类别ID，形状: {label.shape}")
+        else:
+            # 假设已经是类别ID格式
+            label = np.asarray(label_rgb)
+            if label.ndim == 3 and label.shape[-1] == 1:
+                label = label[:, :, 0]
+            label = label.astype(np.uint8, copy=False)
+            self.logger.info(f"标签已经是类别ID格式，形状: {label.shape}")
 
         return label
 
@@ -216,7 +279,7 @@ class PotsdamSAM3Evaluator:
 
     def merge_patches(self, patches, original_shape):
         """
-        合并 patches 回原始图像尺寸
+        合并 patches 回原始图像尺寸（针对离散类别ID使用投票法）
 
         Args:
             patches: patches 列表 [(patch, x, y), ...]
@@ -226,37 +289,73 @@ class PotsdamSAM3Evaluator:
             merged: 合并后的图像
         """
         h, w = original_shape
-        if len(patches[0][0].shape) == 3:
-            merged = np.zeros((h, w, patches[0][0].shape[2]), dtype=patches[0][0].dtype)
-        else:
-            merged = np.zeros((h, w), dtype=patches[0][0].dtype)
 
-        # 用于统计每个像素被多少个 patch 覆盖
-        count_map = np.zeros((h, w), dtype=np.int32)
+        # 对于离散类别，使用投票法而非平均
+        # 存储每个像素的类别投票情况
+        num_classes = len(self.class_info)
+        class_votes = np.zeros((h, w, num_classes), dtype=np.uint8)
+        count_map = np.zeros((h, w), dtype=np.uint8)
 
         for patch, x, y in patches:
             patch_h = min(self.PATCH_SIZE, h - y)
             patch_w = min(self.PATCH_SIZE, w - x)
+            patch_data = patch[:patch_h, :patch_w]
 
-            # 累加（用于后续平均）
-            if len(patch.shape) == 3:
-                merged[y:y+patch_h, x:x+patch_w, :] += patch[:patch_h, :patch_w, :]
-            else:
-                merged[y:y+patch_h, x:x+patch_w] += patch[:patch_h, :patch_w]
+            # 对每个像素的类别进行投票
+            for class_id in range(num_classes):
+                class_mask = (patch_data == class_id)
+                class_votes[y:y+patch_h, x:x+patch_w, class_id] += class_mask.astype(np.uint8)
 
             count_map[y:y+patch_h, x:x+patch_w] += 1
 
-        # 避免除零
-        count_map[count_map == 0] = 1
+        # 对每个像素选择票数最多的类别
+        merged = np.argmax(class_votes, axis=2).astype(np.uint8)
 
-        # 平均重叠区域
-        if len(merged.shape) == 3:
-            for c in range(merged.shape[2]):
-                merged[:, :, c] = merged[:, :, c] / count_map
+        # 处理没有覆盖的区域（设为背景类0）
+        merged[count_map == 0] = 0
+
+        return merged
+
+    def _to_numpy(self, value):
+        """将 SAM3 输出统一转换为 NumPy，避免 GPU tensor 进入后续 OpenCV/NumPy 逻辑。"""
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().numpy()
+        return value
+
+    def _normalize_masks(self, masks):
+        masks = self._to_numpy(masks)
+        if masks is None:
+            return []
+        if isinstance(masks, (list, tuple)):
+            normalized = [np.squeeze(self._to_numpy(mask)) for mask in masks]
         else:
-            merged = merged / count_map
+            masks = np.asarray(masks)
+            if masks.ndim == 2:
+                normalized = [masks]
+            elif masks.ndim == 3:
+                normalized = [np.squeeze(mask) for mask in masks]
+            elif masks.ndim == 4:
+                normalized = [np.squeeze(mask) for mask in masks]
+            else:
+                normalized = []
+        return [mask for mask in normalized if np.asarray(mask).ndim == 2]
 
-        return merged.astype(patches[0][0].dtype)
+    def _normalize_scores(self, scores):
+        scores = self._to_numpy(scores)
+        if scores is None:
+            return np.array([], dtype=np.float32)
+        return np.asarray(scores, dtype=np.float32).reshape(-1)
+
+    def _normalize_boxes(self, boxes):
+        boxes = self._to_numpy(boxes)
+        if boxes is None:
+            return []
+        if isinstance(boxes, (list, tuple)):
+            return [self._to_numpy(box) for box in boxes]
+        boxes = np.asarray(boxes)
+        if boxes.ndim == 1:
+            return [boxes]
+        return [box for box in boxes]
 
     def predict_patch(self, patch, text_prompts):
         """
@@ -299,15 +398,33 @@ class PotsdamSAM3Evaluator:
                     boxes = output.get("boxes", [])
                     scores = output.get("scores", [])
 
+                    masks = self._normalize_masks(masks)
+                    scores = self._normalize_scores(scores)
+                    boxes = self._normalize_boxes(boxes)
+
                     if len(masks) > 0:
+                        if len(scores) == 0:
+                            self.logger.warning(f"类别 {class_id} ({text_prompt}) 返回 mask 但没有 score，已跳过")
+                            continue
+
+                        num_items = min(len(masks), len(scores))
+                        if len(masks) != len(scores):
+                            self.logger.warning(
+                                f"类别 {class_id} ({text_prompt}) mask/score 数量不一致: "
+                                f"{len(masks)} vs {len(scores)}，仅使用前 {num_items} 个"
+                            )
+                            masks = masks[:num_items]
+                            scores = scores[:num_items]
+                            boxes = boxes[:num_items]
+
                         # 过滤低置信度预测
-                        valid_indices = np.array(scores) >= self.SCORE_THRESHOLD
+                        valid_indices = scores >= self.SCORE_THRESHOLD
 
                         if np.any(valid_indices):
-                            all_masks.extend([masks[i] for i in range(len(masks)) if valid_indices[i]])
-                            all_boxes.extend([boxes[i] for i in range(len(boxes)) if valid_indices[i]])
-                            all_scores.extend([scores[i] for i in range(len(scores)) if valid_indices[i]])
-                            all_classes.extend([class_id] * np.sum(valid_indices))
+                            all_masks.extend([masks[i] for i in range(num_items) if valid_indices[i]])
+                            all_boxes.extend([boxes[i] if i < len(boxes) else None for i in range(num_items) if valid_indices[i]])
+                            all_scores.extend([float(scores[i]) for i in range(num_items) if valid_indices[i]])
+                            all_classes.extend([class_id] * int(np.sum(valid_indices)))
 
                 except Exception as e:
                     self.logger.warning(f"类别 {class_id} ({text_prompt}) 预测失败: {e}")
@@ -355,16 +472,20 @@ class PotsdamSAM3Evaluator:
         sorted_indices = np.argsort(scores)[::-1]
 
         for idx in sorted_indices:
-            mask = masks[idx]
-            score = scores[idx]
+            mask = np.squeeze(self._to_numpy(masks[idx]))
+            score = float(scores[idx])
             class_id = classes[idx]
+
+            if mask.ndim != 2:
+                self.logger.warning(f"跳过维度异常的 mask: shape={mask.shape}")
+                continue
 
             # 调整 mask 尺寸
             if mask.shape != (h, w):
-                mask_resized = cv2.resize(mask.astype(np.uint8), (w, h),
-                                        interpolation=cv2.INTER_NEAREST)
+                mask_resized = cv2.resize(mask.astype(np.float32), (w, h),
+                                          interpolation=cv2.INTER_NEAREST)
             else:
-                mask_resized = mask.astype(np.uint8)
+                mask_resized = mask.astype(np.float32)
 
             # 只在置信度更高的区域更新
             update_mask = (mask_resized > 0.5) & (confidence_map < score)
@@ -403,7 +524,7 @@ class PotsdamSAM3Evaluator:
             self.logger.info(f"处理 patch {i+1}/{len(patches)} at position ({x}, {y})")
 
             # 获取所有类别的文本提示
-            text_prompts = [self.CLASS_INFO[i]["prompt"] for i in range(6)]
+            text_prompts = [self.class_info[i]["prompt"] for i in range(len(self.class_info))]
 
             # 预测
             predictions = self.predict_patch(patch, text_prompts)
@@ -437,7 +558,7 @@ class PotsdamSAM3Evaluator:
 
     def calculate_metrics(self, prediction, ground_truth):
         """
-        计算评估指标
+        计算评估指标（排除忽略区域）
 
         Args:
             prediction: 预测标签 (H, W)
@@ -448,9 +569,28 @@ class PotsdamSAM3Evaluator:
         """
         from sklearn.metrics import confusion_matrix, jaccard_score, f1_score, accuracy_score
 
-        # 展平
-        pred_flat = prediction.flatten()
-        gt_flat = ground_truth.flatten()
+        # 排除忽略区域（255）
+        valid_mask = ground_truth != self.IGNORE_INDEX
+
+        # 展平并过滤
+        pred_flat = prediction[valid_mask]
+        gt_flat = ground_truth[valid_mask]
+
+        if len(pred_flat) == 0:
+            self.logger.warning("没有有效像素用于计算指标")
+            return {
+                "overall_accuracy": 0.0,
+                "mean_iou": 0.0,
+                "mean_f1": 0.0,
+                "iou_per_class": [0.0] * 6,
+                "f1_per_class": [0.0] * 6,
+                "precision_per_class": [0.0] * 6,
+                "recall_per_class": [0.0] * 6,
+                "confusion_matrix": [[0] * 6 for _ in range(6)],
+                "valid_pixels": 0,
+                "total_pixels": int(prediction.size),
+                "ignored_pixels": int(prediction.size)
+            }
 
         # 计算混淆矩阵
         cm = confusion_matrix(gt_flat, pred_flat, labels=list(range(6)))
@@ -469,10 +609,10 @@ class PotsdamSAM3Evaluator:
         mean_iou = np.mean(iou_per_class)
 
         # 每个类别的 F1 分数
-        f1_per_class = f1_score(gt_flat, pred_flat, labels=list(range(6)), average=None)
+        f1_per_class = f1_score(gt_flat, pred_flat, labels=list(range(6)), average=None, zero_division=0)
         mean_f1 = np.mean(f1_per_class)
 
-        # 每个类别的精度
+        # 每个类别的精度和召回率
         precision_per_class = []
         recall_per_class = []
         for i in range(6):
@@ -494,7 +634,10 @@ class PotsdamSAM3Evaluator:
             "f1_per_class": [float(x) for x in f1_per_class],
             "precision_per_class": [float(x) for x in precision_per_class],
             "recall_per_class": [float(x) for x in recall_per_class],
-            "confusion_matrix": cm.tolist()
+            "confusion_matrix": cm.tolist(),
+            "valid_pixels": int(len(pred_flat)),
+            "total_pixels": int(prediction.size),
+            "ignored_pixels": int(prediction.size - len(pred_flat))
         }
 
     def save_results(self, image_name, image, ground_truth, prediction, metrics):
@@ -537,7 +680,9 @@ class PotsdamSAM3Evaluator:
         h, w = label.shape
         colored = np.zeros((h, w, 3), dtype=np.uint8)
 
-        for class_id, info in self.CLASS_INFO.items():
+        colored[label == self.IGNORE_INDEX] = [255, 0, 0]
+
+        for class_id, info in self.class_info.items():
             mask = label == class_id
             colored[mask] = info["color"]
 
@@ -586,7 +731,7 @@ class PotsdamSAM3Evaluator:
         metrics_text += f"Mean F1: {metrics['mean_f1']:.4f}\n\n"
 
         metrics_text += "Per-class IoU:\n"
-        for i, info in self.CLASS_INFO.items():
+        for i, info in self.class_info.items():
             metrics_text += f"  {info['name']}: {metrics['iou_per_class'][i]:.4f}\n"
 
         fig.text(0.02, 0.02, metrics_text, fontsize=10,
@@ -644,9 +789,9 @@ class PotsdamSAM3Evaluator:
         }
 
         # 平均指标
-        overall_metrics["average_overall_accuracy"] = np.mean([r["metrics"]["overall_accuracy"] for r in all_results])
-        overall_metrics["average_mean_iou"] = np.mean([r["metrics"]["mean_iou"] for r in all_results])
-        overall_metrics["average_mean_f1"] = np.mean([r["metrics"]["mean_f1"] for r in all_results])
+        overall_metrics["average_overall_accuracy"] = float(np.mean([r["metrics"]["overall_accuracy"] for r in all_results]))
+        overall_metrics["average_mean_iou"] = float(np.mean([r["metrics"]["mean_iou"] for r in all_results]))
+        overall_metrics["average_mean_f1"] = float(np.mean([r["metrics"]["mean_f1"] for r in all_results]))
 
         # 每个类别的平均 IoU
         for i in range(6):
@@ -684,27 +829,110 @@ class PotsdamSAM3Evaluator:
         return overall_metrics
 
 
+def load_yaml_config(config_path):
+    """读取 YAML 配置；缺少 PyYAML 或配置文件时返回空配置。"""
+    if not config_path:
+        return {}
+
+    config_path = Path(config_path)
+    if not config_path.exists():
+        print(f"警告: 配置文件不存在，将使用代码默认值 - {config_path}")
+        return {}
+
+    try:
+        import yaml
+    except ImportError:
+        print("警告: 未安装 PyYAML，无法读取配置文件，将使用代码默认值")
+        return {}
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def build_class_info(config):
+    """从配置文件构建类别定义，缺省时使用代码内置 Potsdam 定义。"""
+    class_config = config.get("classes", {})
+    class_info = {}
+
+    for key, value in class_config.items():
+        if not key.startswith("class_") or not isinstance(value, dict):
+            continue
+
+        class_id = int(value.get("id", key.split("_", 1)[1]))
+        class_info[class_id] = {
+            "name": value.get("name", PotsdamSAM3Evaluator.CLASS_INFO[class_id]["name"]),
+            "prompt": value.get("prompt", PotsdamSAM3Evaluator.CLASS_INFO[class_id]["prompt"]),
+            "color": value.get("color", PotsdamSAM3Evaluator.CLASS_INFO[class_id]["color"]),
+        }
+
+    if not class_info:
+        return PotsdamSAM3Evaluator.CLASS_INFO
+
+    return dict(sorted(class_info.items()))
+
+
+def build_test_images(config):
+    evaluation_config = config.get("evaluation", {})
+    mode = evaluation_config.get("mode", "quick")
+
+    if mode == "full":
+        range_config = evaluation_config.get("full_test_range", {})
+        rows = range_config.get("rows", [])
+        cols = range_config.get("cols", [])
+        return [f"top_potsdam_{row}_{col}" for row in rows for col in cols]
+
+    return evaluation_config.get("quick_test_images", [
+        "top_potsdam_2_10",
+        "top_potsdam_5_11",
+        "top_potsdam_7_9",
+    ])
+
+
 def main():
     """主函数"""
+    parser = argparse.ArgumentParser(description="SAM3 零样本评估 - Potsdam 数据集")
+    parser.add_argument(
+        "--config",
+        default="config_sam3_evaluation.yaml",
+        help="YAML 配置文件路径；不存在或缺少 PyYAML 时使用代码默认值"
+    )
+    args = parser.parse_args()
+
+    config = load_yaml_config(args.config)
+    paths_config = config.get("paths", {})
+    image_processing_config = config.get("image_processing", {})
 
     # 配置路径
-    BASE_DIR = "/home/anjou/PythonENV/Test_11/Potsdam"
-    OUTPUT_DIR = "/home/anjou/PythonENV/Test_11/results"
-    CHECKPOINT_PATH = "/home/anjou/PythonENV/Test_11/sam3/checkpoints/sam3.1_multiplex.pt"
+    BASE_DIR = paths_config.get("base_dir", "/home/anjou/PythonENV/Test_11/Potsdam")
+    OUTPUT_DIR = paths_config.get("output_dir", "/home/anjou/PythonENV/Test_11/results")
+    CHECKPOINT_PATH = paths_config.get(
+        "checkpoint_path",
+        "/home/anjou/PythonENV/Test_11/sam3/checkpoints/sam3.1_multiplex.pt"
+    )
+    IMAGE_SUBDIR = paths_config.get("image_subdir", "2_Ortho_RGB/2_Ortho_RGB")
+    LABEL_SUBDIR = paths_config.get(
+        "label_subdir",
+        "5_Labels_for_participants_no_Boundary/5_Labels_for_participants_no_Boundary"
+    )
+    IMAGE_PATTERN = paths_config.get("image_pattern", "{image_id}_RGB.tif")
+    LABEL_PATTERN = paths_config.get("label_pattern", "{image_id}_label_noBoundary.tif")
 
     # 快速验证的图像选择（代表性场景组合）
-    TEST_IMAGES = [
-        "top_potsdam_2_10",  # 简单城市场景
-        "top_potsdam_5_11",  # 中等复杂度场景
-        "top_potsdam_7_9",   # 复杂密集建筑场景
-    ]
+    TEST_IMAGES = build_test_images(config)
+    CLASS_INFO = build_class_info(config)
+
+    PATCH_SIZE = image_processing_config.get("patch_size", PotsdamSAM3Evaluator.PATCH_SIZE)
+    STRIDE = image_processing_config.get("stride", PotsdamSAM3Evaluator.STRIDE)
+    SCORE_THRESHOLD = image_processing_config.get("score_threshold", PotsdamSAM3Evaluator.SCORE_THRESHOLD)
 
     print("=" * 60)
     print("SAM3 零样本评估 - Potsdam 数据集")
     print("=" * 60)
     print(f"基础目录: {BASE_DIR}")
     print(f"输出目录: {OUTPUT_DIR}")
+    print(f"配置文件: {args.config if config else '未使用配置文件'}")
     print(f"测试图像: {TEST_IMAGES}")
+    print(f"Patch 参数: size={PATCH_SIZE}, stride={STRIDE}, score_threshold={SCORE_THRESHOLD}")
     print(f"设备: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
     print("=" * 60)
 
@@ -720,7 +948,11 @@ def main():
     evaluator = PotsdamSAM3Evaluator(
         base_dir=BASE_DIR,
         output_dir=OUTPUT_DIR,
-        checkpoint_path=CHECKPOINT_PATH
+        checkpoint_path=CHECKPOINT_PATH,
+        patch_size=PATCH_SIZE,
+        stride=STRIDE,
+        score_threshold=SCORE_THRESHOLD,
+        class_info=CLASS_INFO
     )
 
     # 处理每张测试图像
@@ -728,15 +960,15 @@ def main():
 
     for image_id in TEST_IMAGES:
         # 构造文件路径
-        image_path = f"{BASE_DIR}/2_Ortho_RGB/2_Ortho_RGB/{image_id}_RGB.tif"
-        label_path = f"{BASE_DIR}/5_Labels_for_participants_no_Boundary/5_Labels_for_participants_no_Boundary/{image_id}_label_noBoundary.tif"
+        image_path = Path(BASE_DIR) / IMAGE_SUBDIR / IMAGE_PATTERN.format(image_id=image_id)
+        label_path = Path(BASE_DIR) / LABEL_SUBDIR / LABEL_PATTERN.format(image_id=image_id)
 
         # 检查文件是否存在
-        if not Path(image_path).exists():
+        if not image_path.exists():
             print(f"错误: 图像文件不存在 - {image_path}")
             continue
 
-        if not Path(label_path).exists():
+        if not label_path.exists():
             print(f"错误: 标签文件不存在 - {label_path}")
             continue
 
@@ -751,7 +983,7 @@ def main():
             print(f"  Mean IoU: {result['metrics']['mean_iou']:.4f}")
             print(f"  Mean F1: {result['metrics']['mean_f1']:.4f}")
 
-            for i, info in evaluator.CLASS_INFO.items():
+            for i, info in evaluator.class_info.items():
                 iou = result['metrics']['iou_per_class'][i]
                 print(f"  IoU ({info['name']}): {iou:.4f}")
 
@@ -773,7 +1005,7 @@ def main():
         print(f"  平均 Mean F1: {overall_metrics['average_mean_f1']:.4f}")
 
         print("\n各类别平均 IoU:")
-        for i, info in evaluator.CLASS_INFO.items():
+        for i, info in evaluator.class_info.items():
             avg_iou = overall_metrics[f"average_iou_class_{i}"]
             print(f"  {info['name']}: {avg_iou:.4f}")
     else:
