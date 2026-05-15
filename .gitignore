@@ -1,0 +1,76 @@
+# 数据集目录
+Potsdam/
+
+# 模型权重和检查点文件
+*.pth
+*.pt
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.safetensors
+*.bin
+*.onnx
+*.pb
+ckpt/
+checkpoints/
+checkpoints/*
+*/checkpoints/*
+**/checkpoints/**
+
+# Python虚拟环境
+.venv/
+.venv_hf/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Python缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 测试和覆盖率
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IDE和编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 临时文件
+*.log
+*.tmp
+*.temp
+.cache/
+
+# 数据文件
+*.csv
+*.json
+*.yaml
+*.yml
+!config*.yaml
+!config*.yml
+!requirements*.txt
+
+# 模型输出
+outputs/
+results/
+runs/
+wandb/
