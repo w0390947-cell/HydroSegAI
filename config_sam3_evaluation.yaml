@@ -120,6 +120,10 @@ device:
   # 是否使用混合精度
   use_fp16: true
 
+  # GPU 推理数据类型: "auto", "bfloat16", "float16", "float32"
+  # auto 会优先使用 GPU 支持的 bfloat16，避免 SAM3 内部 BF16 激活与 Float32 权重不一致
+  gpu_dtype: "auto"
+
 # 输出配置
 output:
   # 是否保存预测标签

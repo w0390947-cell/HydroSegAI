@@ -18,6 +18,7 @@ from matplotlib.colors import ListedColormap
 import cv2
 from datetime import datetime
 from pathlib import Path
+from contextlib import nullcontext
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -72,7 +73,7 @@ class PotsdamSAM3Evaluator:
 
     def __init__(self, base_dir, output_dir="results", checkpoint_path=None,
                  patch_size=None, stride=None, score_threshold=None,
-                 class_info=None):
+                 class_info=None, gpu_dtype="auto"):
         """
         初始化评估器
 
@@ -88,6 +89,8 @@ class PotsdamSAM3Evaluator:
         self.PATCH_SIZE = patch_size or self.PATCH_SIZE
         self.STRIDE = stride or self.STRIDE
         self.SCORE_THRESHOLD = score_threshold if score_threshold is not None else self.SCORE_THRESHOLD
+        self.gpu_dtype_config = gpu_dtype
+        self.model_dtype = None
 
         # 创建输出目录
         self.output_dir.mkdir(exist_ok=True, parents=True)
@@ -126,6 +129,58 @@ class PotsdamSAM3Evaluator:
         self.logger.addHandler(stream_handler)
 
         self.logger.info(f"SAM3 零样本评估开始 - 设备: {self.device}")
+
+    def _resolve_gpu_dtype(self):
+        """解析 GPU 推理 dtype；保持 GPU 运行，不通过降级 CPU 规避 dtype 问题。"""
+        if self.device != "cuda":
+            return torch.float32
+
+        dtype_config = str(self.gpu_dtype_config or "auto").lower()
+        if dtype_config in ("bf16", "bfloat16"):
+            return torch.bfloat16
+        if dtype_config in ("fp16", "float16", "half"):
+            return torch.float16
+        if dtype_config in ("fp32", "float32", "full"):
+            return torch.float32
+        if dtype_config != "auto":
+            self.logger.warning(f"未知 gpu_dtype={self.gpu_dtype_config}，将使用 auto 策略")
+
+        if torch.cuda.is_bf16_supported():
+            return torch.bfloat16
+        return torch.float16
+
+    def _configure_cuda_precision(self):
+        """设置 CUDA 计算精度，并统一模型参数 dtype。"""
+        if self.device != "cuda":
+            self.model_dtype = torch.float32
+            return
+
+        self.model_dtype = self._resolve_gpu_dtype()
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
+        self.model.to(device=self.device, dtype=self.model_dtype)
+
+        first_param = next(self.model.parameters(), None)
+        if first_param is not None:
+            self.logger.info(
+                f"CUDA 推理 dtype 已设置为 {self.model_dtype}，"
+                f"首个参数 dtype={first_param.dtype}, device={first_param.device}"
+            )
+
+        nn_module = getattr(torch, "nn", None)
+        module_type = getattr(nn_module, "Module", None)
+        if self.processor is not None and module_type is not None:
+            for name, value in vars(self.processor).items():
+                if isinstance(value, module_type):
+                    value.to(device=self.device, dtype=self.model_dtype)
+                    self.logger.info(f"Processor 模块已同步 dtype: {name}")
+
+    def _inference_autocast(self):
+        """SAM3 GPU 推理使用和模型一致的 autocast dtype，避免 BF16/Float 混用。"""
+        if self.device != "cuda" or self.model_dtype == torch.float32:
+            return nullcontext()
+        return torch.autocast(device_type="cuda", dtype=self.model_dtype)
 
     def _load_sam3_model(self):
         """加载 SAM3 模型"""
@@ -171,14 +226,7 @@ class PotsdamSAM3Evaluator:
             # 创建处理器
             self.processor = Sam3Processor(self.model)
             self.model.to(self.device)
-
-            # 强制使用 float32 而不是 bfloat16
-            if hasattr(self.model, 'half'):
-                # 如果模型是半精度，转回全精度
-                pass  # 保持默认精度
-            else:
-                self.logger.info("使用默认精度 (float32)")
-
+            self._configure_cuda_precision()
             self.model.eval()
 
             self.logger.info(f"SAM3 模型加载成功，使用设备: {self.device}")
@@ -417,7 +465,8 @@ class PotsdamSAM3Evaluator:
                 pil_image = patch
 
             # 设置图像
-            inference_state = self.processor.set_image(pil_image)
+            with torch.inference_mode(), self._inference_autocast():
+                inference_state = self.processor.set_image(pil_image)
 
             # 存储所有类别的预测结果
             all_masks = []
@@ -429,10 +478,11 @@ class PotsdamSAM3Evaluator:
             for class_id, text_prompt in enumerate(text_prompts):
                 try:
                     # 使用文本提示
-                    output = self.processor.set_text_prompt(
-                        state=inference_state,
-                        prompt=text_prompt
-                    )
+                    with torch.inference_mode(), self._inference_autocast():
+                        output = self.processor.set_text_prompt(
+                            state=inference_state,
+                            prompt=text_prompt
+                        )
 
                     masks = output.get("masks", [])
                     boxes = output.get("boxes", [])
@@ -941,6 +991,7 @@ def main():
     config = load_yaml_config(args.config)
     paths_config = config.get("paths", {})
     image_processing_config = config.get("image_processing", {})
+    device_config = config.get("device", {})
 
     # 配置路径
     BASE_DIR = paths_config.get("base_dir", "/home/anjou/PythonENV/Test_11/Potsdam")
@@ -964,6 +1015,7 @@ def main():
     PATCH_SIZE = image_processing_config.get("patch_size", PotsdamSAM3Evaluator.PATCH_SIZE)
     STRIDE = image_processing_config.get("stride", PotsdamSAM3Evaluator.STRIDE)
     SCORE_THRESHOLD = image_processing_config.get("score_threshold", PotsdamSAM3Evaluator.SCORE_THRESHOLD)
+    GPU_DTYPE = device_config.get("gpu_dtype", "auto")
 
     print("=" * 60)
     print("SAM3 零样本评估 - Potsdam 数据集")
@@ -973,6 +1025,7 @@ def main():
     print(f"配置文件: {args.config if config else '未使用配置文件'}")
     print(f"测试图像: {TEST_IMAGES}")
     print(f"Patch 参数: size={PATCH_SIZE}, stride={STRIDE}, score_threshold={SCORE_THRESHOLD}")
+    print(f"GPU dtype: {GPU_DTYPE}")
     print(f"设备: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
     print("=" * 60)
 
@@ -992,7 +1045,8 @@ def main():
         patch_size=PATCH_SIZE,
         stride=STRIDE,
         score_threshold=SCORE_THRESHOLD,
-        class_info=CLASS_INFO
+        class_info=CLASS_INFO,
+        gpu_dtype=GPU_DTYPE
     )
 
     # 处理每张测试图像
