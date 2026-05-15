@@ -1,0 +1,3 @@
+2026-05-15 15:18:08,919 - INFO - SAM3 零样本评估开始 - 设备: cuda
+2026-05-15 15:18:08,919 - INFO - 正在加载 SAM3 模型...
+2026-05-15 15:18:08,919 - ERROR - SAM3 模型加载失败: expected str, bytes or os.PathLike object, not NoneType

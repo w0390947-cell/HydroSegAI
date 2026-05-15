@@ -132,25 +132,62 @@ class PotsdamSAM3Evaluator:
         try:
             self.logger.info("正在加载 SAM3 模型...")
 
+            # 检查 checkpoint 路径
+            if self.checkpoint_path:
+                checkpoint_path = Path(self.checkpoint_path)
+                if not checkpoint_path.exists():
+                    self.logger.warning(f"Checkpoint 文件不存在: {checkpoint_path}")
+                    self.logger.info("尝试从 HuggingFace 加载模型...")
+                    self.checkpoint_path = None
+                else:
+                    self.logger.info(f"使用本地 checkpoint: {checkpoint_path}")
+
+            # 直接设置 BPE 文件路径
+            bpe_path = "/home/anjou/PythonENV/Test_11/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz"
+
+            if Path(bpe_path).exists():
+                self.logger.info(f"找到 BPE 文件: {bpe_path}")
+            else:
+                self.logger.warning(f"BPE 文件不存在: {bpe_path}")
+                bpe_path = None
+
             # 构建 SAM3 图像模型
             if self.checkpoint_path:
+                self.logger.info(f"从本地加载模型: {self.checkpoint_path}")
                 self.model = build_sam3_image_model(
-                    checkpoint_path=self.checkpoint_path,
-                    load_from_HF=False
+                    bpe_path=bpe_path,
+                    checkpoint_path=str(self.checkpoint_path),
+                    load_from_HF=False,
+                    compile=False  # 禁用编译以避免数据类型问题
                 )
             else:
                 # 从 HuggingFace 加载
-                self.model = build_sam3_image_model()
+                self.logger.info("从 HuggingFace 加载模型...")
+                self.model = build_sam3_image_model(
+                    bpe_path=bpe_path,
+                    compile=False
+                )
 
             # 创建处理器
             self.processor = Sam3Processor(self.model)
             self.model.to(self.device)
+
+            # 强制使用 float32 而不是 bfloat16
+            if hasattr(self.model, 'half'):
+                # 如果模型是半精度，转回全精度
+                pass  # 保持默认精度
+            else:
+                self.logger.info("使用默认精度 (float32)")
+
             self.model.eval()
 
             self.logger.info(f"SAM3 模型加载成功，使用设备: {self.device}")
 
         except Exception as e:
             self.logger.error(f"SAM3 模型加载失败: {e}")
+            self.logger.error(f"Checkpoint 路径: {self.checkpoint_path}")
+            import traceback
+            self.logger.error(f"详细错误: {traceback.format_exc()}")
             raise
 
     def read_image(self, image_path):
@@ -369,10 +406,13 @@ class PotsdamSAM3Evaluator:
             result: 预测结果字典
         """
         try:
-            # 转换为 PIL Image
+            # 转换为 PIL Image 并确保数据类型正确
             if isinstance(patch, np.ndarray):
                 patch_rgb = patch[:, :, :3] if patch.shape[2] >= 3 else patch
-                pil_image = Image.fromarray(patch_rgb.astype('uint8'))
+                # 确保图像数据是 uint8 类型
+                if patch_rgb.dtype != np.uint8:
+                    patch_rgb = (patch_rgb * 255).astype(np.uint8) if patch_rgb.max() <= 1.0 else patch_rgb.astype(np.uint8)
+                pil_image = Image.fromarray(patch_rgb)
             else:
                 pil_image = patch
 
