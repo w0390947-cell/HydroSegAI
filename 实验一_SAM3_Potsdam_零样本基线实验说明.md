@@ -28,7 +28,7 @@ NDVI、DSM 等先验是否能改善推理分割
 |---|---|
 | 实验脚本 | `exp1_sam3_potsdam_zeroshot_baseline.py` |
 | 实验配置 | `exp1_sam3_potsdam_zeroshot_baseline.yaml` |
-| 结果目录 | `results_exp1_sam3_potsdam_zeroshot_baseline/` |
+| 结果目录 | 由 YAML `paths.output_dir` 指定 |
 | 结果说明 | `实验一_SAM3_Potsdam_零样本结果说明.md` |
 | 结果分析 | `实验一_SAM3_Potsdam_零样本结果分析.md` |
 
@@ -43,18 +43,26 @@ Exp1 当前只使用 Potsdam 数据集中的 RGB 影像和 noBoundary 标签。
 | 影像文件模式 | `{image_id}_RGB.tif` |
 | 标签文件模式 | `{image_id}_label_noBoundary.tif` |
 | 样本发现方式 | RGB 影像和 noBoundary 标签自动配对 |
-| 当前样本数 | 38 张 |
-| 评估模式 | `full` |
+| 样本数 | 以运行时自动发现的文件交集为准；当前服务器数据预计为 38 张 |
+| 评估范围 | 完整可配对样本 |
 
 配置位置：
 
 ```yaml
 evaluation:
-  mode: "full"
-  discover_from_files: true
+  test_images: []
 ```
 
-这里使用文件交集自动发现样本，而不是手写固定行列范围。这样可以避免候选范围中存在影像或标签缺失时造成不一致。
+`test_images` 留空时，脚本会固定使用文件交集自动发现完整配对样本，而不是手写固定行列范围。这样可以避免候选范围中存在影像或标签缺失时造成不一致。
+
+如需调试小样本，应显式填写 `test_images`：
+
+```yaml
+evaluation:
+  test_images:
+    - "top_potsdam_2_10"
+    - "top_potsdam_5_11"
+```
 
 ## 4. Potsdam 类别定义
 
@@ -145,12 +153,14 @@ SAM3Processor 内部候选过滤阶段
 
 这样后续如果调整 `score_threshold`，不会出现 SAM3Processor 仍按默认 `0.5` 提前丢弃候选的问题。
 
-Patch 融合采用置信度加权融合：
+Patch 融合采用两阶段置信度融合：
 
 ```text
-同一像素可能被多个 patch 覆盖；
-同一像素也可能被多个类别 mask 覆盖；
-脚本按类别累积置信度分数；
+第一阶段发生在单个 patch 内：
+同一像素如果被多个类别 mask 覆盖，脚本保留置信度最高的类别。
+
+第二阶段发生在多个 patch 合并时：
+同一像素如果被多个重叠 patch 覆盖，脚本按类别累积来自各 patch 的置信度分数；
 最终选择累计分数最高的类别作为该像素预测类别。
 ```
 
@@ -161,6 +171,36 @@ class 5: clutter/background
 ```
 
 如果理论上出现某个像素没有被任何 patch 覆盖，则视为切片覆盖错误，脚本应报错或进入严格检查逻辑，而不应静默当作背景。
+
+### 7.1 推理健康检查
+
+为了避免 SAM3 推理链路异常被误当作真实 zero-shot 结果，脚本会对每张图记录推理健康统计：
+
+```text
+patch_calls           patch 推理调用次数
+patch_failures        patch 级推理失败次数
+prompt_calls          prompt 推理调用次数
+prompt_successes      prompt 推理成功次数
+prompt_failures       prompt 推理失败次数
+empty_prompt_outputs  成功调用但没有有效输出的 prompt 次数
+valid_masks           通过 score_threshold 的有效 mask 数量
+prompt_failure_rate   prompt 推理失败率
+```
+
+单张图必须满足以下条件才会进入指标计算：
+
+```text
+patch_failures == 0
+prompt_failure_rate <= 5%
+valid_masks >= 1
+```
+
+如果不满足这些条件，脚本会将该样本记为失败样本，并跳过该样本的指标计算。这样可以区分两种情况：
+
+```text
+正常推理但局部像素无有效 mask：这些像素回退为 clutter/background
+整张图推理链路异常或完全无有效 mask：该图失败，不纳入总体指标
+```
 
 ## 8. 评估指标
 
@@ -201,15 +241,22 @@ average_*  : 先计算单图指标，再对图像取平均，作为辅助参考
 dataset_overall_accuracy
 dataset_mean_iou
 dataset_mean_f1
-dataset_mean_precision
-dataset_mean_recall
 dataset_frequency_weighted_iou
 dataset_iou_per_class
 ```
 
+其中 precision 和 recall 仍会完整保存，但在 Exp1 中主要作为辅助诊断指标使用，用于分析类别误检和漏检倾向，不作为论文主表的核心排序指标。
+
 ## 9. 输出内容
 
-Exp1 会在 `results_exp1_sam3_potsdam_zeroshot_baseline/` 下保存结果。
+Exp1 会在 YAML `paths.output_dir` 指定的目录下保存结果。当前服务器配置为：
+
+```yaml
+paths:
+  output_dir: "/home/anjou/PythonENV/Test_11/results_exp1_sam3_potsdam_zeroshot_baseline"
+```
+
+逻辑目录名仍为 `results_exp1_sam3_potsdam_zeroshot_baseline`。
 
 主要目录结构：
 
@@ -258,16 +305,28 @@ results_exp1_sam3_potsdam_zeroshot_baseline/
 ```text
 overall_metrics.json
 per_image_metrics.csv
+run_context.json
+config_snapshot.yaml
 *_metrics.json
 ```
 
 其中：
 
 ```text
-overall_metrics.json     数据集总体指标
+overall_metrics.json     数据集总体指标，并包含 run_context、inference_health、模型来源和实际配置
 per_image_metrics.csv    每张图的关键指标表
-*_metrics.json           单张图的完整指标
+run_context.json         本次运行的样本完整性记录，包括成功、跳过和失败样本
+config_snapshot.yaml     本次运行使用的 YAML 配置快照
+*_metrics.json           单张图的完整指标，并包含该图的 inference_stats
 ```
+
+`overall_metrics.json` 的 `run_context.metrics_scope` 为：
+
+```text
+successful_images_only
+```
+
+这表示总体指标只基于成功完成推理健康检查并完成指标计算的样本。若存在缺失文件或推理失败样本，应同时查看 `run_context.json` 或 `overall_metrics.json` 中的 `run_context` 字段。
 
 ### 9.4 logs
 
@@ -278,12 +337,6 @@ evaluation_log_*.txt
 ```
 
 ## 10. 运行命令
-
-建议先 dry-run，确认数据路径、样本数量、patch 数量和输出目录。
-
-```bash
-.venv_hf/bin/python exp1_sam3_potsdam_zeroshot_baseline.py --dry-run
-```
 
 正式运行：
 
@@ -296,13 +349,6 @@ evaluation_log_*.txt
 ```bash
 .venv_hf/bin/python exp1_sam3_potsdam_zeroshot_baseline.py \
   --config exp1_sam3_potsdam_zeroshot_baseline.yaml
-```
-
-如需指定输出目录：
-
-```bash
-.venv_hf/bin/python exp1_sam3_potsdam_zeroshot_baseline.py \
-  --output-dir results_exp1_sam3_potsdam_zeroshot_baseline
 ```
 
 ## 11. 与后续实验的关系

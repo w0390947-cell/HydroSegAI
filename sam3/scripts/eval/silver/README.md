@@ -388,7 +388,7 @@ A sample annotation from DROID domain looks as follows:
 
 ### Data Stats
 
-Here are the stats for the 10 annotation domains. The # Image-NPs represent the total number of unique image-NP pairs including both “positive” and “negative” NPs.
+Here are the stats for the 10 annotation domains. The # Image-NPs represent the total number of unique image-NP pairs including both “positive” and “negative” NPs. 
 
 
 | Domain                   | # Image-NPs  | # Image-NP-Masks|

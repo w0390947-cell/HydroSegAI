@@ -136,7 +136,19 @@ Mean Precision、Mean Recall、Mean F1 均为 6 个类别的宏平均。
 | `results_exp1_sam3_potsdam_zeroshot_baseline/visualizations/*_comparison.png` | 原图、GT、预测、叠加图对比 |
 | `results_exp1_sam3_potsdam_zeroshot_baseline/metrics/per_image_metrics.csv` | 每张图的指标 |
 | `results_exp1_sam3_potsdam_zeroshot_baseline/metrics/overall_metrics.json` | 数据集级累计指标和逐图平均指标 |
+| `results_exp1_sam3_potsdam_zeroshot_baseline/metrics/config_snapshot.yaml` | 本次运行使用的配置快照 |
+| `results_exp1_sam3_potsdam_zeroshot_baseline/metrics/run_context.json` | 自动发现样本、成功处理样本和跳过/失败样本记录 |
 | `results_exp1_sam3_potsdam_zeroshot_baseline/logs/evaluation_log_*.txt` | 运行日志 |
+
+本次运行共生成：
+
+| 输出类型 | 数量 | 说明 |
+|---|---:|---|
+| predictions | 152 | 38 张图，每张包含彩色预测、彩色 GT、预测 ID、GT ID |
+| visualizations | 38 | 每张图 1 张对比可视化 |
+| metrics | 42 | 38 个单图 JSON + 4 个总体/配置文件 |
+
+当前配置中 `metrics.save_confusion_matrix=false`，因此没有单独生成 `dataset_confusion_matrix.csv`；数据集级混淆矩阵保存在 `overall_metrics.json` 的 `dataset_confusion_matrix` 字段中。
 
 ## 8. 结果解读注意事项
 
@@ -162,26 +174,46 @@ We evaluate SAM3 on the ISPRS Potsdam RGB orthophotos under a zero-shot setting.
 本文在零样本设置下评估 SAM3 在 ISPRS Potsdam RGB 正射影像上的语义分割能力。输入图像被切分为 1008 x 1008 的边缘对齐滑窗 patch，并分别使用 Potsdam 六个语义类别作为文本提示。patch 内 mask 根据 SAM3 置信度融合，重叠 patch 通过类别置信度累加方式合并。评估采用 noBoundary 标签，黑色边界像素作为 ignore，不参与指标计算。本文报告数据集级 OA、mIoU、FWIoU、mean F1、mean precision、mean recall 以及各类别 IoU/F1。
 ```
 
-## 10. 结果填写模板
+## 10. 本次实验结果
 
-完整运行 `python exp1_sam3_potsdam_zeroshot_baseline.py` 后，可从 `results_exp1_sam3_potsdam_zeroshot_baseline/metrics/overall_metrics.json` 中填写下表：
+本次 `exp1_sam3_potsdam_zeroshot_baseline.py` 已完成全量运行，38 张自动发现样本全部成功处理。其中 `top_potsdam_4_12_RGB` 的 noBoundary 标签有效像素为 0，所有像素均为 ignore；它不影响 `dataset_*` 累计混淆矩阵指标，但会进入 `average_*` 逐图平均。
+
+### 10.1 数据集级主结果
+
+论文主表建议使用 `overall_metrics.json` 中的 `dataset_*` 指标：
 
 | 指标 | 数值 |
 |---|---:|
-| OA | 待运行后填写 |
-| mIoU | 待运行后填写 |
-| FWIoU | 待运行后填写 |
-| Mean F1 | 待运行后填写 |
-| Mean Precision | 待运行后填写 |
-| Mean Recall | 待运行后填写 |
+| OA | 0.0892 |
+| mIoU | 0.0578 |
+| FWIoU | 0.0426 |
+| Mean F1 | 0.1020 |
+| Mean Precision | 0.5776 |
+| Mean Recall | 0.1702 |
 
-各类别结果：
+逐图平均指标仅作为补充分析：
 
-| 类别 | IoU | F1 |
-|---|---:|---:|
-| impervious surface | 待运行后填写 | 待运行后填写 |
-| building | 待运行后填写 | 待运行后填写 |
-| low vegetation | 待运行后填写 | 待运行后填写 |
-| tree | 待运行后填写 | 待运行后填写 |
-| car | 待运行后填写 | 待运行后填写 |
-| clutter/background | 待运行后填写 | 待运行后填写 |
+| 指标 | 数值 |
+|---|---:|
+| Average OA | 0.0865 |
+| Average mIoU | 0.0559 |
+| Average Mean F1 | 0.0948 |
+
+### 10.2 各类别结果
+
+| 类别 | GT 占比 | 预测占比 | IoU | F1 | Precision | Recall |
+|---|---:|---:|---:|---:|---:|---:|
+| impervious surface | 29.41% | 20.47% | 0.1197 | 0.2138 | 0.2605 | 0.1813 |
+| building | 26.54% | 0.31% | 0.0112 | 0.0221 | 0.9656 | 0.0112 |
+| low vegetation | 22.31% | 0.07% | 0.0007 | 0.0014 | 0.2231 | 0.0007 |
+| tree | 15.66% | 0.00% | 0.0001 | 0.0002 | 0.9955 | 0.0001 |
+| car | 1.41% | 0.26% | 0.1778 | 0.3019 | 0.9823 | 0.1784 |
+| clutter/background | 4.65% | 78.89% | 0.0375 | 0.0723 | 0.0383 | 0.6495 |
+
+### 10.3 结果简要解读
+
+本次实验表明，直接使用 SAM3 和 Potsdam 官方类别名 prompt 进行 RGB 零样本密集语义分割效果较弱。数据集级 mIoU 为 0.0578，Mean F1 为 0.1020，说明模型很难稳定覆盖 Potsdam 的六类像素级语义。
+
+主要失败模式是过度回退到 `clutter/background`。真实标签中 `clutter/background` 只占 4.65%，但预测结果中该类占 78.89%。这意味着大量不透水表面、建筑物、低矮植被、树木和车辆像素没有被 SAM3 的有效 mask 覆盖，最终被归入 fallback 背景类。
+
+从类别指标看，`car` 的 IoU 相对最高，为 0.1778；`impervious surface` 次之，为 0.1197。`building`、`low vegetation` 和 `tree` 的 recall 极低，说明模型即使在少数预测上 precision 较高，也没有召回大多数真实目标。因此论文中应将本实验定位为负基线或动机实验，用于说明通用开放词汇分割模型直接迁移到遥感密集语义分割存在明显不足。

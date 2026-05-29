@@ -432,7 +432,7 @@ class AsyncImageFrameLoader:
         self.images[index] = img
         return img
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.images)
 
 
@@ -442,7 +442,13 @@ class TorchCodecDecoder:
     which are not supported by `torchcodec.decoders.SimpleVideoDecoder` yet.
     """
 
-    def __init__(self, source, dimension_order="NCHW", device="cpu", num_threads=1):
+    def __init__(
+        self,
+        source: Union[str, bytes],
+        dimension_order: str = "NCHW",
+        device: str = "cpu",
+        num_threads: int = 1,
+    ) -> None:
         from torchcodec import _core as core
 
         self._source = source  # hold a reference to the source to prevent it from GC
@@ -506,13 +512,13 @@ class FIFOLock:
                 self._condition.wait()
                 # got the lock and it's our turn
 
-    def release(self):
+    def release(self) -> None:
         with self._condition:
             self._lock.release()
             self._waiters.get()
             self._condition.notify_all()
 
-    def __enter__(self):
+    def __enter__(self) -> None:
         self.acquire()
 
     def __exit__(
@@ -704,7 +710,7 @@ class AsyncVideoFileLoaderWithTorchCodec:
             frame_resized = frame_resized.to(device=self.out_device, non_blocking=True)
         return frame_resized
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: int) -> torch.Tensor:
         if self.exception is not None:
             raise RuntimeError("Failure in frame loading thread") from self.exception
 
@@ -726,10 +732,10 @@ class AsyncVideoFileLoaderWithTorchCodec:
 
         raise RuntimeError(f"Failed to load frame {index} after {max_tries} tries")
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.images)
 
-    def __getstate__(self):
+    def __getstate__(self) -> dict[str, Any]:
         """
         Remove a few attributes during pickling, so that this async video loader can be
         saved and loaded as a part of the model session.

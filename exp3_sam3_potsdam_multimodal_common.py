@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Shared utilities for Exp3 Potsdam multi-modal SAM3 experiments."""
 
 import argparse
 import json
@@ -7,22 +6,28 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-import torch
-from PIL import Image
 
 from exp1_sam3_potsdam_zeroshot_baseline import (
     PotsdamSAM3Evaluator,
     SAM3_AVAILABLE,
     build_class_info,
+    build_test_images,
     load_yaml_config,
+    save_config_snapshot,
+    save_run_context,
 )
 from exp2a_sam3_potsdam_no_background_prompt import (
-    count_patches_with_exp1_logic,
     load_prompt_class_config,
+    print_exp2_header,
+    print_image_metrics,
+    print_overall_metrics,
+    print_prompt_ensemble_summary,
+    print_prompt_policy_summary,
+    raise_sam3_unavailable_error,
+    run_exp2_evaluation,
 )
 from exp2b_sam3_potsdam_visual_prompt_ensemble import (
     load_prompt_variants,
-    print_prompt_variants,
 )
 from exp2c_sam3_potsdam_prompt_ensemble_mask_filter import (
     Exp2CPromptEnsembleMaskFilterEvaluator,
@@ -30,44 +35,49 @@ from exp2c_sam3_potsdam_prompt_ensemble_mask_filter import (
     print_filter_rules,
 )
 
+POTSDAM_DEV_IMAGE_IDS = [
+    "top_potsdam_2_10",
+    "top_potsdam_2_11",
+    "top_potsdam_2_12",
+    "top_potsdam_3_10",
+    "top_potsdam_3_11",
+    "top_potsdam_3_12",
+    "top_potsdam_4_10",
+    "top_potsdam_4_11",
+    "top_potsdam_4_12",
+    "top_potsdam_5_10",
+    "top_potsdam_5_11",
+    "top_potsdam_5_12",
+    "top_potsdam_6_7",
+    "top_potsdam_6_8",
+    "top_potsdam_6_9",
+    "top_potsdam_6_10",
+    "top_potsdam_6_11",
+    "top_potsdam_6_12",
+    "top_potsdam_7_7",
+    "top_potsdam_7_8",
+    "top_potsdam_7_9",
+    "top_potsdam_7_10",
+    "top_potsdam_7_11",
+    "top_potsdam_7_12",
+]
 
-def _potsdam_image_id_sort_key(image_id):
-    return [int(part) if part.isdigit() else part for part in image_id.split("_")]
-
-
-def _pattern_parts(pattern):
-    if "{image_id}" not in pattern:
-        raise ValueError(f"文件命名模式必须包含 {{image_id}}: {pattern}")
-    prefix, suffix = pattern.split("{image_id}", 1)
-    return prefix, suffix
-
-
-def discover_paired_image_ids_by_pattern(
-    base_dir,
-    image_subdir,
-    label_subdir,
-    image_pattern,
-    label_pattern,
-):
-    image_dir = Path(base_dir) / image_subdir
-    label_dir = Path(base_dir) / label_subdir
-    if not image_dir.exists() or not label_dir.exists():
-        return []
-
-    image_prefix, image_suffix = _pattern_parts(image_pattern)
-    label_prefix, label_suffix = _pattern_parts(label_pattern)
-
-    image_ids = set()
-    for path in image_dir.glob(f"{image_prefix}*{image_suffix}"):
-        name = path.name
-        image_ids.add(name[len(image_prefix): len(name) - len(image_suffix)])
-
-    label_ids = set()
-    for path in label_dir.glob(f"{label_prefix}*{label_suffix}"):
-        name = path.name
-        label_ids.add(name[len(label_prefix): len(name) - len(label_suffix)])
-
-    return sorted(image_ids & label_ids, key=_potsdam_image_id_sort_key)
+POTSDAM_HELDOUT_IMAGE_IDS = [
+    "top_potsdam_2_13",
+    "top_potsdam_2_14",
+    "top_potsdam_3_13",
+    "top_potsdam_3_14",
+    "top_potsdam_4_13",
+    "top_potsdam_4_14",
+    "top_potsdam_4_15",
+    "top_potsdam_5_13",
+    "top_potsdam_5_14",
+    "top_potsdam_5_15",
+    "top_potsdam_6_13",
+    "top_potsdam_6_14",
+    "top_potsdam_6_15",
+    "top_potsdam_7_13",
+]
 
 
 def build_exp3_test_images(config, settings):
@@ -76,29 +86,54 @@ def build_exp3_test_images(config, settings):
     if explicit_images:
         return explicit_images
 
-    mode = evaluation_config.get("mode", "quick")
-    if evaluation_config.get("discover_from_files") or mode in ("full", "all", "auto"):
-        discovered = discover_paired_image_ids_by_pattern(
-            settings["base_dir"],
-            settings["image_subdir"],
-            settings["label_subdir"],
-            settings["image_pattern"],
-            settings["label_pattern"],
+    split = str(evaluation_config.get("split", "dev")).lower()
+    if split in ("dev", "development", "participant", "participants"):
+        return list(POTSDAM_DEV_IMAGE_IDS)
+    if split in ("heldout", "held-out", "test", "official_test"):
+        return list(POTSDAM_HELDOUT_IMAGE_IDS)
+    if split in ("all", "full"):
+        return build_test_images(
+            config,
+            base_dir=settings["base_dir"],
+            image_subdir=settings["image_subdir"],
+            label_subdir=settings["label_subdir"],
+            image_pattern=settings["image_pattern"],
+            label_pattern=settings["label_pattern"],
         )
-        if discovered:
-            return discovered
 
-    if mode == "full":
-        range_config = evaluation_config.get("full_test_range", {})
-        rows = range_config.get("rows", [])
-        cols = range_config.get("cols", [])
-        return [f"top_potsdam_{row}_{col}" for row in rows for col in cols]
+    raise ValueError(
+        "evaluation.split 必须是 dev、heldout 或 all；"
+        f"实际为: {evaluation_config.get('split')}"
+    )
 
-    return evaluation_config.get("quick_test_images", [
-        "top_potsdam_2_10",
-        "top_potsdam_5_11",
-        "top_potsdam_7_9",
-    ])
+
+def build_exp3_split_metadata(config, test_images):
+    evaluation_config = config.get("evaluation", {})
+    explicit_images = evaluation_config.get("test_images")
+    split = str(evaluation_config.get("split", "dev")).lower()
+    if explicit_images:
+        split = "custom"
+    if split in ("development", "participant", "participants"):
+        split = "dev"
+    elif split in ("held-out", "test", "official_test"):
+        split = "heldout"
+    elif split == "full":
+        split = "all"
+
+    return {
+        "split": split,
+        "split_description": (
+            "24 official participant-labeled tiles for modality analysis"
+            if split == "dev"
+            else "14 held-out fully referenced tiles for final evaluation"
+            if split == "heldout"
+            else "explicit user-provided image list"
+            if split == "custom"
+            else "all paired fully referenced tiles"
+        ),
+        "num_split_images": len(test_images),
+        "split_image_ids": list(test_images),
+    }
 
 
 def load_exp3_settings(args, default_output_dir):
@@ -106,6 +141,9 @@ def load_exp3_settings(args, default_output_dir):
     paths_config = config.get("paths", {})
     image_processing_config = config.get("image_processing", {})
     device_config = config.get("device", {})
+    model_config = config.get("model", {})
+    output_config = config.get("output", {})
+    metrics_config = config.get("metrics", {})
 
     settings = {
         "config": config,
@@ -129,6 +167,9 @@ def load_exp3_settings(args, default_output_dir):
         ),
         "gpu_dtype": device_config.get("gpu_dtype", "float32"),
         "device_type": device_config.get("type", "auto"),
+        "allow_hf_fallback": model_config.get("allow_hf_fallback", False),
+        "output_config": output_config,
+        "metrics_config": metrics_config,
         "input_modality": config.get("input_modality", {}),
         "multiview": config.get("multiview", {}),
     }
@@ -137,6 +178,7 @@ def load_exp3_settings(args, default_output_dir):
         settings["excluded_prompt_class_ids"],
     ) = load_prompt_class_config(config, settings["class_info"])
     settings["test_images"] = build_exp3_test_images(config, settings)
+    settings["split_metadata"] = build_exp3_split_metadata(config, settings["test_images"])
     return settings
 
 
@@ -248,7 +290,7 @@ def compute_ndvi_uint8(nir, red):
 
 
 class Exp3SingleModalityEvaluator(Exp2CPromptEnsembleMaskFilterEvaluator):
-    """Exp3 single-modality evaluator using Exp2-C reasoning strategy."""
+    """Exp3 single-modality evaluator using the fixed Exp2-B prompt ensemble strategy."""
 
     def __init__(
         self,
@@ -256,12 +298,14 @@ class Exp3SingleModalityEvaluator(Exp2CPromptEnsembleMaskFilterEvaluator):
         experiment_name,
         input_modality,
         rgbir_composite_mode=None,
+        split_metadata=None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.experiment_name = experiment_name
         self.input_modality = input_modality
         self.rgbir_composite_mode = rgbir_composite_mode
+        self.split_metadata = split_metadata or {}
 
     def read_image(self, image_path):
         if self.input_modality != "rgbir_composite":
@@ -283,10 +327,16 @@ class Exp3SingleModalityEvaluator(Exp2CPromptEnsembleMaskFilterEvaluator):
 
         return rgbir_to_composite(image, self.rgbir_composite_mode)
 
-    def save_overall_metrics(self, all_results):
-        PotsdamSAM3Evaluator.save_overall_metrics(self, all_results)
+    def save_overall_metrics(self, all_results, run_context=None):
+        overall_metrics = PotsdamSAM3Evaluator.save_overall_metrics(
+            self,
+            all_results,
+            run_context=run_context,
+        )
         metadata = self._build_metadata()
         self._write_metadata(metadata)
+        overall_metrics.update(metadata)
+        return overall_metrics
 
     def _build_metadata(self):
         prompt_calls_per_patch = sum(
@@ -295,7 +345,7 @@ class Exp3SingleModalityEvaluator(Exp2CPromptEnsembleMaskFilterEvaluator):
         return {
             "experiment_name": self.experiment_name,
             "experiment_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "variable_under_test": "input remote-sensing modality under fixed Exp2-C reasoning strategy",
+            "variable_under_test": "input remote-sensing modality under fixed Exp2-B prompt ensemble strategy",
             "input_modality": self.input_modality,
             "rgbir_composite_mode": self.rgbir_composite_mode,
             "prompt_class_ids": self.prompt_class_ids,
@@ -315,6 +365,7 @@ class Exp3SingleModalityEvaluator(Exp2CPromptEnsembleMaskFilterEvaluator):
             "mask_filter_enabled": self.mask_filter_enabled,
             "mask_filter_area_rules": self.area_rules,
             "mask_filter_stats": self.mask_filter_stats,
+            "evaluation_split": self.split_metadata,
         }
 
     def _write_metadata(self, metadata):
@@ -350,6 +401,7 @@ class Exp3MultiViewFusionEvaluator(Exp3SingleModalityEvaluator):
         self.logger.info(f"正在处理多视图样本: {image_id}")
 
         label = self.read_label(label_path)
+        image_stats = self._new_image_inference_stats(f"{image_id}_multiview")
         view_images = []
         for view_config in self.view_configs:
             image = self._read_view_image(view_config, image_id)
@@ -368,6 +420,7 @@ class Exp3MultiViewFusionEvaluator(Exp3SingleModalityEvaluator):
                 break
 
         predicted_patches = []
+        patch_counter = 0
         for view_config, image in view_images:
             patches = self.slice_image(image)
             view_weight = float(view_config.get("weight", 1.0))
@@ -383,7 +436,14 @@ class Exp3MultiViewFusionEvaluator(Exp3SingleModalityEvaluator):
                     (class_id, self.class_info[class_id]["prompt"])
                     for class_id in self.class_ids
                 ]
-                predictions = self.predict_patch(patch, text_prompts)
+                patch_counter += 1
+                predictions = self.predict_patch(
+                    patch,
+                    text_prompts,
+                    image_stats=image_stats,
+                    patch_index=patch_counter,
+                    patch_position=(x, y),
+                )
                 fused_mask, confidence_map = self.fuse_multiclass_masks(
                     predictions,
                     patch.shape[:2],
@@ -394,6 +454,9 @@ class Exp3MultiViewFusionEvaluator(Exp3SingleModalityEvaluator):
                 confidence_map = confidence_map[:patch_h, :patch_w] * view_weight
                 predicted_patches.append((fused_mask, confidence_map, x, y))
 
+        self._validate_image_inference_health(image_stats)
+        self._merge_image_inference_stats(image_stats)
+
         predicted_label = self.merge_patches(predicted_patches, label.shape)
         metrics = self.calculate_metrics(predicted_label, label)
         self.save_results(
@@ -402,11 +465,13 @@ class Exp3MultiViewFusionEvaluator(Exp3SingleModalityEvaluator):
             label,
             predicted_label,
             metrics,
+            inference_stats=image_stats,
         )
 
         return {
             "image_name": f"{image_id}_multiview",
             "metrics": metrics,
+            "inference_stats": image_stats,
         }
 
     def _build_metadata(self):
@@ -416,115 +481,140 @@ class Exp3MultiViewFusionEvaluator(Exp3SingleModalityEvaluator):
         return metadata
 
 
-def dry_run_single(settings, experiment_name, prompt_variants, mask_filter_config):
-    class_info = settings["class_info"]
-    prompt_class_ids = settings["prompt_class_ids"]
-    excluded_prompt_class_ids = settings["excluded_prompt_class_ids"]
-    total_patches = 0
-    missing_files = []
-    size_mismatches = []
-
-    for image_id in settings["test_images"]:
-        image_path, label_path = image_and_label_paths(settings, image_id)
-        if not image_path.exists() or not label_path.exists():
-            missing_files.append((image_id, str(image_path), str(label_path)))
-            continue
-        with Image.open(label_path) as label:
-            label_w, label_h = label.size
-        # Read dimensions from label; Potsdam orthophotos are coregistered.
-        image_w, image_h = label_w, label_h
-        total_patches += count_patches_with_exp1_logic(
-            image_w,
-            image_h,
-            settings["patch_size"],
-            settings["stride"],
+def print_exp3_header(settings, config_path, experiment_name, prompt_variants, mask_filter_config):
+    def print_exp3_variables():
+        print_prompt_policy_summary(settings)
+        print_prompt_ensemble_summary(settings, prompt_variants)
+        print_filter_rules(settings["class_info"], mask_filter_config, settings["score_threshold"])
+        modality_config = settings.get("input_modality", {})
+        split_metadata = settings.get("split_metadata", {})
+        print(
+            f"评估划分: {split_metadata.get('split', 'unknown')} "
+            f"({split_metadata.get('num_split_images', len(settings['test_images']))} images)"
         )
+        print(f"输入模态: {modality_config.get('name', 'rgb')}")
+        if modality_config.get("rgbir_composite_mode"):
+            print(f"RGBIR composite mode: {modality_config['rgbir_composite_mode']}")
 
-    prompt_calls_per_patch = sum(len(prompt_variants[class_id]) for class_id in prompt_class_ids)
-    print("=" * 72)
-    print(experiment_name)
-    print("=" * 72)
-    print(f"基础目录: {settings['base_dir']}")
-    print(f"输出目录: {settings['output_dir']}")
-    print(f"输入影像目录: {settings['image_subdir']}")
-    print(f"输入影像模式: {settings['image_pattern']}")
-    print(f"输入模态: {settings['input_modality']}")
-    print(f"图像数量: {len(settings['test_images'])}")
-    print(f"预计 patch 总数: {total_patches}")
-    print(f"每个 patch 文本 prompt 调用数: {prompt_calls_per_patch}")
-    print(f"预计 SAM3 文本 prompt 调用数: {total_patches * prompt_calls_per_patch}")
-    print_prompt_variants(
-        class_info,
-        prompt_variants,
-        prompt_class_ids,
-        excluded_prompt_class_ids,
+        view_configs = settings.get("multiview", {}).get("views", [])
+        if view_configs:
+            print(f"多视图融合: {settings.get('multiview', {}).get('fusion', 'confidence_sum')}")
+            for view_config in view_configs:
+                print(
+                    f"  view={view_config.get('name')} "
+                    f"type={view_config.get('type')} "
+                    f"weight={view_config.get('weight', 1.0)}"
+                )
+
+    print_exp2_header(
+        settings,
+        config_path,
+        experiment_name,
+        extra_lines_callback=print_exp3_variables,
     )
-    print_filter_rules(class_info, mask_filter_config, settings["score_threshold"])
-    print("文件检查:", "通过" if not missing_files else f"缺失 {len(missing_files)} 个")
-    print("尺寸检查:", "通过" if not size_mismatches else f"异常 {len(size_mismatches)} 个")
-    print("=" * 72)
 
 
-def dry_run_multiview(settings, experiment_name, prompt_variants, mask_filter_config):
+def run_exp3_multiview_evaluation(settings, evaluator, config_path):
+    all_results = []
+    expected_images = list(settings["test_images"])
+    processed_images = []
+    skipped_images = []
+    failed_images = []
     view_configs = settings["multiview"].get("views", [])
-    prompt_class_ids = settings["prompt_class_ids"]
-    excluded_prompt_class_ids = settings["excluded_prompt_class_ids"]
-    total_patches = 0
-    missing_files = []
+
     for image_id in settings["test_images"]:
         _, label_path = image_and_label_paths(settings, image_id)
+
         if not label_path.exists():
-            missing_files.append((image_id, str(label_path)))
+            print(f"错误: 标签文件不存在 - {label_path}")
+            skipped_images.append({
+                "image_id": image_id,
+                "reason": "missing_label_file",
+                "label_path": str(label_path),
+            })
             continue
+
+        missing_views = []
         for view_config in view_configs:
             image_path = view_image_path(settings["base_dir"], view_config, image_id)
             if not image_path.exists():
-                missing_files.append((image_id, str(image_path)))
-        with Image.open(label_path) as label:
-            image_w, image_h = label.size
-        total_patches += count_patches_with_exp1_logic(
-            image_w,
-            image_h,
-            settings["patch_size"],
-            settings["stride"],
-        )
+                missing_views.append({
+                    "view": view_config.get("name"),
+                    "image_path": str(image_path),
+                })
 
-    prompt_calls_per_patch = sum(len(prompt_variants[class_id]) for class_id in prompt_class_ids)
-    print("=" * 72)
-    print(experiment_name)
-    print("=" * 72)
-    print(f"基础目录: {settings['base_dir']}")
-    print(f"输出目录: {settings['output_dir']}")
-    print(f"图像数量: {len(settings['test_images'])}")
-    print(f"视图数量: {len(view_configs)}")
-    for view_config in view_configs:
-        print(
-            f"  {view_config.get('name')}: {view_config.get('type')} "
-            f"weight={view_config.get('weight', 1.0)}"
-        )
-    print(f"预计单视图 patch 总数: {total_patches}")
-    print(f"预计多视图 patch 总数: {total_patches * len(view_configs)}")
-    print(f"每个 patch 文本 prompt 调用数: {prompt_calls_per_patch}")
-    print(
-        "预计 SAM3 文本 prompt 调用数: "
-        f"{total_patches * len(view_configs) * prompt_calls_per_patch}"
+        if missing_views:
+            print(f"错误: 多视图样本缺失输入影像 - {image_id}")
+            skipped_images.append({
+                "image_id": image_id,
+                "reason": "missing_view_image_file",
+                "label_path": str(label_path),
+                "missing_views": missing_views,
+            })
+            continue
+
+        try:
+            result = evaluator.process_image_id(image_id, label_path)
+            all_results.append(result)
+            processed_images.append(result["image_name"])
+            print_image_metrics(result, evaluator.class_info)
+        except Exception as exc:
+            print(f"处理 {image_id} 时出错: {exc}")
+            failed_images.append({
+                "image_id": image_id,
+                "reason": str(exc),
+                "exception_type": type(exc).__name__,
+                "label_path": str(label_path),
+            })
+            import traceback
+
+            traceback.print_exc()
+            continue
+
+    config_snapshot_path = save_config_snapshot(config_path, settings["output_dir"])
+    run_context = {
+        "config_path": str(config_path) if config_path else None,
+        "config_snapshot_path": config_snapshot_path,
+        "expected_images": expected_images,
+        "processed_images": processed_images,
+        "skipped_images": skipped_images,
+        "failed_images": failed_images,
+        "num_expected_images": len(expected_images),
+        "num_processed_images": len(processed_images),
+        "num_skipped_images": len(skipped_images),
+        "num_failed_images": len(failed_images),
+        "metrics_scope": "successful_images_only",
+        "evaluation_split": settings.get("split_metadata", {}),
+    }
+    run_context_path = save_run_context(settings["output_dir"], run_context)
+
+    if all_results:
+        print("\n" + "=" * 72)
+        print("保存总体评估指标...")
+        overall = evaluator.save_overall_metrics(all_results, run_context=run_context)
+
+        if skipped_images or failed_images:
+            print(
+                "警告: 本次评估存在未纳入总体指标的样本。"
+                f"期望 {len(expected_images)} 张，成功 {len(processed_images)} 张，"
+                f"跳过 {len(skipped_images)} 张，失败 {len(failed_images)} 张。"
+                "总体指标仅基于成功样本。"
+            )
+
+        print_overall_metrics(overall, evaluator.class_info)
+        print(f"\n评估完成！结果保存在: {settings['output_dir']}")
+        return overall
+
+    raise RuntimeError(
+        "没有成功处理任何图像；不会生成总体指标。"
+        f"样本处理状态已保存到 {run_context_path}"
     )
-    print_prompt_variants(
-        settings["class_info"],
-        prompt_variants,
-        prompt_class_ids,
-        excluded_prompt_class_ids,
-    )
-    print_filter_rules(settings["class_info"], mask_filter_config, settings["score_threshold"])
-    print("文件检查:", "通过" if not missing_files else f"缺失 {len(missing_files)} 个")
-    print("=" * 72)
 
 
 def run_single_modality_experiment(experiment_name, default_config_path, default_output_dir):
     parser = argparse.ArgumentParser(description=experiment_name)
     parser.add_argument("--config", default=default_config_path, help="YAML 配置文件路径")
     parser.add_argument("--output-dir", default=None, help=f"输出目录；默认 {default_output_dir}")
-    parser.add_argument("--dry-run", action="store_true", help="只检查配置，不加载 SAM3")
     args = parser.parse_args()
 
     settings = load_exp3_settings(args, default_output_dir)
@@ -536,13 +626,10 @@ def run_single_modality_experiment(experiment_name, default_config_path, default
     mask_filter_config = load_mask_filter_config(settings["config"])
     mask_filter_config["prompt_class_ids"] = settings["prompt_class_ids"]
 
-    if args.dry_run:
-        dry_run_single(settings, experiment_name, prompt_variants, mask_filter_config)
-        return
+    print_exp3_header(settings, args.config, experiment_name, prompt_variants, mask_filter_config)
 
     if not SAM3_AVAILABLE:
-        print("错误: SAM3 模块不可用，请先安装 SAM3")
-        return
+        raise_sam3_unavailable_error(experiment_name)
 
     modality_config = settings.get("input_modality", {})
     evaluator = Exp3SingleModalityEvaluator(
@@ -555,6 +642,9 @@ def run_single_modality_experiment(experiment_name, default_config_path, default
         class_info=settings["class_info"],
         gpu_dtype=settings["gpu_dtype"],
         device_type=settings["device_type"],
+        allow_hf_fallback=settings["allow_hf_fallback"],
+        output_config=settings["output_config"],
+        metrics_config=settings["metrics_config"],
         prompt_variants=prompt_variants,
         mask_filter_config=mask_filter_config,
         prompt_class_ids=settings["prompt_class_ids"],
@@ -562,35 +652,16 @@ def run_single_modality_experiment(experiment_name, default_config_path, default
         experiment_name=experiment_name,
         input_modality=modality_config.get("name", "rgb"),
         rgbir_composite_mode=modality_config.get("rgbir_composite_mode"),
+        split_metadata=settings["split_metadata"],
     )
 
-    all_results = []
-    for image_id in settings["test_images"]:
-        image_path, label_path = image_and_label_paths(settings, image_id)
-        if not image_path.exists() or not label_path.exists():
-            print(f"跳过缺失样本: {image_id}")
-            continue
-        try:
-            result = evaluator.process_image(image_path, label_path)
-            all_results.append(result)
-            print(f"\n{result['image_name']} Mean IoU: {result['metrics']['mean_iou']:.4f}")
-        except Exception as exc:
-            print(f"处理 {image_id} 时出错: {exc}")
-            import traceback
-            traceback.print_exc()
-
-    if all_results:
-        evaluator.save_overall_metrics(all_results)
-        print(f"\n评估完成！结果保存在: {settings['output_dir']}")
-    else:
-        print("没有成功处理任何图像。")
+    return run_exp2_evaluation(settings, evaluator, args.config)
 
 
 def run_multiview_experiment(experiment_name, default_config_path, default_output_dir):
     parser = argparse.ArgumentParser(description=experiment_name)
     parser.add_argument("--config", default=default_config_path, help="YAML 配置文件路径")
     parser.add_argument("--output-dir", default=None, help=f"输出目录；默认 {default_output_dir}")
-    parser.add_argument("--dry-run", action="store_true", help="只检查配置，不加载 SAM3")
     args = parser.parse_args()
 
     settings = load_exp3_settings(args, default_output_dir)
@@ -605,13 +676,10 @@ def run_multiview_experiment(experiment_name, default_config_path, default_outpu
     if not view_configs:
         raise ValueError("Exp3-D 配置缺少 multiview.views")
 
-    if args.dry_run:
-        dry_run_multiview(settings, experiment_name, prompt_variants, mask_filter_config)
-        return
+    print_exp3_header(settings, args.config, experiment_name, prompt_variants, mask_filter_config)
 
     if not SAM3_AVAILABLE:
-        print("错误: SAM3 模块不可用，请先安装 SAM3")
-        return
+        raise_sam3_unavailable_error(experiment_name)
 
     evaluator = Exp3MultiViewFusionEvaluator(
         base_dir=settings["base_dir"],
@@ -623,32 +691,17 @@ def run_multiview_experiment(experiment_name, default_config_path, default_outpu
         class_info=settings["class_info"],
         gpu_dtype=settings["gpu_dtype"],
         device_type=settings["device_type"],
+        allow_hf_fallback=settings["allow_hf_fallback"],
+        output_config=settings["output_config"],
+        metrics_config=settings["metrics_config"],
         prompt_variants=prompt_variants,
         mask_filter_config=mask_filter_config,
         prompt_class_ids=settings["prompt_class_ids"],
         excluded_prompt_class_ids=settings["excluded_prompt_class_ids"],
         experiment_name=experiment_name,
         rgbir_composite_mode=None,
+        split_metadata=settings["split_metadata"],
         view_configs=view_configs,
     )
 
-    all_results = []
-    for image_id in settings["test_images"]:
-        _, label_path = image_and_label_paths(settings, image_id)
-        if not label_path.exists():
-            print(f"跳过缺失标签: {image_id}")
-            continue
-        try:
-            result = evaluator.process_image_id(image_id, label_path)
-            all_results.append(result)
-            print(f"\n{result['image_name']} Mean IoU: {result['metrics']['mean_iou']:.4f}")
-        except Exception as exc:
-            print(f"处理 {image_id} 时出错: {exc}")
-            import traceback
-            traceback.print_exc()
-
-    if all_results:
-        evaluator.save_overall_metrics(all_results)
-        print(f"\n评估完成！结果保存在: {settings['output_dir']}")
-    else:
-        print("没有成功处理任何图像。")
+    return run_exp3_multiview_evaluation(settings, evaluator, args.config)

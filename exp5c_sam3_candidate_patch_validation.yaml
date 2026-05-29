@@ -1,0 +1,78 @@
+# Exp5-C: validate SAM3 masks on SegFormer-guided candidate patches.
+
+paths:
+  base_dir: "/home/anjou/PythonENV/Test_11/Potsdam"
+  image_subdir: "2_Ortho_RGB/2_Ortho_RGB"
+  image_pattern: "{image_id}_RGB.tif"
+  segformer_eval_dir: "results_segformer_potsdam_rgb/eval_heldout_uncertainty"
+  candidate_dir: "results_exp5b_segformer_candidate_regions_heldout"
+  output_dir: "results_exp5c_sam3_candidate_patch_validation_heldout"
+  checkpoint_path: "/home/anjou/PythonENV/Test_11/sam3/checkpoints/sam3.1_multiplex.pt"
+
+model:
+  allow_hf_fallback: false
+
+evaluation:
+  split: "heldout"
+  image_ids: []
+  # Keep the first Exp5-C run bounded. Set to -1 for all candidate patches.
+  max_images: -1
+  max_patches_per_image: 6
+  max_total_patches: 60
+  min_candidate_ratio: 0.08
+  sort_patches_by: "candidate_ratio"
+  dry_run: false
+
+image_processing:
+  patch_size: 1008
+  stride: 672
+  score_threshold: 0.5
+  restrict_masks_to_candidate: true
+
+device:
+  type: "cuda"
+  gpu_dtype: "float32"
+
+output:
+  save_patch_visualizations: true
+  save_mask_overlays: false
+  visualization_dpi: 150
+  image_format: "png"
+  log_level: "INFO"
+
+prompt_policy:
+  prompt_class_ids: [0, 1, 2, 3, 4]
+  excluded_prompt_class_ids: [5]
+
+prompt_ensemble:
+  prompts:
+    class_0:
+      - "impervious surface"
+      - "road and pavement"
+      - "asphalt road"
+      - "paved area"
+      - "parking lot"
+    class_1:
+      - "building"
+      - "buildings"
+      - "rooftop"
+      - "building roof"
+      - "house roof"
+    class_2:
+      - "low vegetation"
+      - "grass"
+      - "lawn"
+      - "low plants"
+      - "ground vegetation"
+    class_3:
+      - "tree"
+      - "trees"
+      - "tree crown"
+      - "tall tree"
+      - "urban trees"
+    class_4:
+      - "car"
+      - "cars"
+      - "vehicle"
+      - "small vehicle"
+      - "parked car"

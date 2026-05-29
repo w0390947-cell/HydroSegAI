@@ -1,0 +1,100 @@
+# Exp3-A SAM3 Potsdam RGB modality held-out configuration
+
+paths:
+  base_dir: "/home/anjou/PythonENV/Test_11/Potsdam"
+  output_dir: "/home/anjou/PythonENV/Test_11/results_exp3a_sam3_potsdam_rgb_modality_heldout"
+  checkpoint_path: "/home/anjou/PythonENV/Test_11/sam3/checkpoints/sam3.1_multiplex.pt"
+
+  image_subdir: "2_Ortho_RGB/2_Ortho_RGB"
+  label_subdir: "5_Labels_all_noBoundary"
+  image_pattern: "{image_id}_RGB.tif"
+  label_pattern: "{image_id}_label_noBoundary.tif"
+
+model:
+  allow_hf_fallback: false
+
+evaluation:
+  # Remaining 14 fully referenced tiles used only for final held-out evaluation.
+  split: "heldout"
+  test_images: []
+
+image_processing:
+  patch_size: 1008
+  stride: 672
+  score_threshold: 0.5
+
+device:
+  type: "cuda"
+  gpu_dtype: "float32"
+
+output:
+  save_predictions: true
+  save_visualizations: true
+  visualization_dpi: 150
+  image_format: "png"
+  log_level: "INFO"
+
+prompt_policy:
+  prompt_class_ids: [0, 1, 2, 3, 4]
+  excluded_prompt_class_ids: [5]
+
+prompt_ensemble:
+  prompts:
+    class_0:
+      - "impervious surface"
+      - "road and pavement"
+      - "asphalt road"
+      - "paved area"
+      - "parking lot"
+    class_1:
+      - "building"
+      - "buildings"
+      - "rooftop"
+      - "building roof"
+      - "house roof"
+    class_2:
+      - "low vegetation"
+      - "grass"
+      - "lawn"
+      - "low plants"
+      - "ground vegetation"
+    class_3:
+      - "tree"
+      - "trees"
+      - "tree crown"
+      - "tall tree"
+      - "urban trees"
+    class_4:
+      - "car"
+      - "cars"
+      - "vehicle"
+      - "small vehicle"
+      - "parked car"
+
+mask_filter:
+  enabled: false
+  class_area_ratio:
+    class_0:
+      min: 0.001
+      max: 0.80
+    class_1:
+      min: 0.0005
+      max: 0.60
+    class_2:
+      min: 0.001
+      max: 0.80
+    class_3:
+      min: 0.0003
+      max: 0.50
+    class_4:
+      min: 0.00001
+      max: 0.05
+
+input_modality:
+  name: "rgb"
+  description: "Natural RGB orthophoto input."
+
+metrics:
+  save_confusion_matrix: false
+  detailed_class_report: true
+

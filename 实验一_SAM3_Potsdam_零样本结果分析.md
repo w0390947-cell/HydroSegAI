@@ -15,6 +15,7 @@ results_exp1_sam3_potsdam_zeroshot_baseline/
 | 输入影像 | `Potsdam/2_Ortho_RGB/2_Ortho_RGB` |
 | 参考标签 | `Potsdam/5_Labels_all_noBoundary` |
 | 自动发现样本数 | 38 张 |
+| 成功处理样本数 | 38 张 |
 | 有有效评估像素的样本数 | 37 张 |
 | 全 ignore 样本 | `top_potsdam_4_12_RGB` |
 | Patch 大小 | `1008 x 1008` |
@@ -30,15 +31,18 @@ results_exp1_sam3_potsdam_zeroshot_baseline/
 |---|---:|---|
 | `results_exp1_sam3_potsdam_zeroshot_baseline/predictions` | 152 | 38 张图，每张包含彩色预测、彩色 GT、预测 ID、GT ID |
 | `results_exp1_sam3_potsdam_zeroshot_baseline/visualizations` | 38 | 每张图一张对比可视化 |
-| `results_exp1_sam3_potsdam_zeroshot_baseline/metrics` | 41 | 38 个单图 JSON + 3 个总体指标文件 |
+| `results_exp1_sam3_potsdam_zeroshot_baseline/metrics` | 42 | 38 个单图 JSON + `overall_metrics.json`、`per_image_metrics.csv`、`config_snapshot.yaml`、`run_context.json` |
 
 关键结果文件：
 
 ```text
 results_exp1_sam3_potsdam_zeroshot_baseline/metrics/overall_metrics.json
 results_exp1_sam3_potsdam_zeroshot_baseline/metrics/per_image_metrics.csv
-results_exp1_sam3_potsdam_zeroshot_baseline/metrics/dataset_confusion_matrix.csv
+results_exp1_sam3_potsdam_zeroshot_baseline/metrics/run_context.json
+results_exp1_sam3_potsdam_zeroshot_baseline/metrics/config_snapshot.yaml
 ```
+
+当前配置中 `metrics.save_confusion_matrix=false`，因此没有单独生成 `dataset_confusion_matrix.csv`；数据集级混淆矩阵保存在 `overall_metrics.json` 的 `dataset_confusion_matrix` 字段中。
 
 ## 2. 总体结果
 

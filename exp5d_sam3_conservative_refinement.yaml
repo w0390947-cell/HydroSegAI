@@ -1,0 +1,42 @@
+# Exp5-D: conservative SAM3 refinement on SegFormer candidate regions.
+#
+# Design principle:
+#   GT labels are used only for evaluation, never for refinement decisions.
+#   All refinement gates are configurable so the method remains a transferable
+#   remote-sensing inference component instead of a Potsdam-specific tweak.
+
+paths:
+  output_dir: "results_exp5d_sam3_conservative_refinement_heldout"
+  exp5c_config: "exp5c_sam3_candidate_patch_validation.yaml"
+  segformer_eval_dir: "results_segformer_potsdam_rgb/eval_heldout_uncertainty"
+  candidate_dir: "results_exp5b_segformer_candidate_regions_heldout"
+
+evaluation:
+  split: "heldout"
+  max_total_patches: 60
+  dry_run: false
+
+refinement:
+  # Start conservatively: only classes that behaved as relatively precise object
+  # proposals in Exp5-C. This is a configurable policy, not a hard-coded Potsdam
+  # assumption.
+  accepted_class_ids: [1, 4]
+  score_threshold: 0.55
+  min_mask_area: 16
+  max_mask_area_fraction: 0.08
+  require_candidate_region: true
+  require_uncertainty_gate: true
+  apply_only_where_prediction_differs: true
+  mask_priority: "score"
+
+  uncertainty_gate:
+    entropy_min: 0.15
+    margin_max: 0.80
+    confidence_max: 0.98
+    mode: "any"
+
+output:
+  save_refined_predictions: true
+  save_change_maps: true
+  save_patch_visualizations: true
+  image_format: "png"

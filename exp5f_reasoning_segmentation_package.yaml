@@ -1,0 +1,29 @@
+# Exp5-F: package a transferable reasoning segmentation output.
+#
+# This stage does not tune Potsdam labels and does not overwrite the semantic
+# prediction. It assembles coarse prediction, uncertainty/candidate maps, and
+# SAM3 proposal audit conclusions into an explainable inference product.
+
+paths:
+  segformer_eval_dir: "results_segformer_potsdam_rgb/eval_heldout_uncertainty"
+  candidate_dir: "results_exp5b_segformer_candidate_regions_heldout"
+  proposal_audit_dir: "results_exp5e_sam3_proposal_quality_audit_heldout"
+  output_dir: "results_exp5f_reasoning_segmentation_package_heldout"
+
+package:
+  final_prediction_source: "segformer"
+  include_ground_truth_metrics: true
+  image_format: "png"
+
+review_priority:
+  candidate_weight: 0.35
+  entropy_weight: 0.30
+  low_margin_weight: 0.20
+  boundary_weight: 0.15
+  high_priority_threshold: 0.60
+  medium_priority_threshold: 0.35
+
+output:
+  save_overlays: true
+  save_component_masks: true
+  save_manifests: true

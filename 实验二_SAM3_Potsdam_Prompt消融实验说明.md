@@ -37,7 +37,7 @@ Exp2-A / Exp2-B / Exp2-C 使用相同数据：
 | 标签语义 | Potsdam 标准 6 类 |
 | ignore 区域 | noBoundary 标签中的黑色 `(0,0,0)`，映射为 `255` |
 | 样本发现方式 | RGB 影像和 noBoundary 标签自动配对 |
-| 当前样本数 | 38 张 |
+| 当前样本数 | 默认自动发现 RGB 影像与 noBoundary 标签的完整交集；当前数据集为 38 张 |
 | patch size | `1008` |
 | stride | `672` |
 | patch 方式 | 边缘对齐滑窗 |
@@ -110,17 +110,21 @@ fallback 类别
 
 ### 3.4 运行命令
 
-检查配置：
-
-```bash
-.venv_hf/bin/python exp2a_sam3_potsdam_no_background_prompt.py --dry-run
-```
-
 正式运行：
 
 ```bash
 .venv_hf/bin/python exp2a_sam3_potsdam_no_background_prompt.py
 ```
+
+如需显式指定配置或输出目录：
+
+```bash
+.venv_hf/bin/python exp2a_sam3_potsdam_no_background_prompt.py \
+  --config exp2a_sam3_potsdam_no_background_prompt.yaml \
+  --output-dir /home/anjou/PythonENV/Test_11/results_exp2a_sam3_potsdam_no_background_prompt
+```
+
+如需小样本检查，可在 YAML 的 `evaluation.test_images` 中显式填写样本 ID；留空则运行所有可配对样本。
 
 ## 4. Exp2-B：Visual Prompt Ensemble
 
@@ -179,6 +183,8 @@ building roof
 class 1: building
 ```
 
+这些 prompt variants 是在运行测试集之前，依据 Potsdam 类别语义和通用视觉概念预先设计的固定集合；不是根据测试集指标、单张测试图像可视化结果或逐类测试表现反复筛选得到的。所有测试图像和后续实验均使用同一组 prompt variants。
+
 ### 4.3 计算量
 
 Exp2-B 每个 patch 的 prompt 调用数为：
@@ -204,16 +210,18 @@ Exp2-B 每个 patch 的 prompt 调用数为：
 
 ### 4.5 运行命令
 
-检查配置：
-
-```bash
-.venv_hf/bin/python exp2b_sam3_potsdam_visual_prompt_ensemble.py --dry-run
-```
-
 正式运行：
 
 ```bash
 .venv_hf/bin/python exp2b_sam3_potsdam_visual_prompt_ensemble.py
+```
+
+如需显式指定配置或输出目录：
+
+```bash
+.venv_hf/bin/python exp2b_sam3_potsdam_visual_prompt_ensemble.py \
+  --config exp2b_sam3_potsdam_visual_prompt_ensemble.yaml \
+  --output-dir /home/anjou/PythonENV/Test_11/results_exp2b_sam3_potsdam_visual_prompt_ensemble
 ```
 
 ## 5. Exp2-C：Prompt Ensemble + Mask Filtering
@@ -283,6 +291,8 @@ mask_area_ratio = mask 像素数 / patch 像素数
 
 这些阈值按 Potsdam 高分辨率影像中不同类别的常见尺度预先固定，不针对单张测试图像调参。
 
+与 Exp2-B 的 prompt variants 一样，Exp2-C 的面积阈值属于实验前设定的类别尺度先验，而不是根据测试集结果调出的最优阈值。
+
 ### 5.4 过滤统计
 
 Exp2-C 会保存每类 mask 过滤统计：
@@ -311,16 +321,18 @@ results_exp2c_sam3_potsdam_prompt_ensemble_mask_filter/metrics/experiment_metada
 
 ### 5.6 运行命令
 
-检查配置：
-
-```bash
-.venv_hf/bin/python exp2c_sam3_potsdam_prompt_ensemble_mask_filter.py --dry-run
-```
-
 正式运行：
 
 ```bash
 .venv_hf/bin/python exp2c_sam3_potsdam_prompt_ensemble_mask_filter.py
+```
+
+如需显式指定配置或输出目录：
+
+```bash
+.venv_hf/bin/python exp2c_sam3_potsdam_prompt_ensemble_mask_filter.py \
+  --config exp2c_sam3_potsdam_prompt_ensemble_mask_filter.yaml \
+  --output-dir /home/anjou/PythonENV/Test_11/results_exp2c_sam3_potsdam_prompt_ensemble_mask_filter
 ```
 
 ## 6. Exp2 系列对比关系
@@ -332,7 +344,32 @@ results_exp2c_sam3_potsdam_prompt_ensemble_mask_filter/metrics/experiment_metada
 | Exp2-B | no | 前景类 prompt ensemble | 无额外过滤 | prompt 构造是否影响候选 mask |
 | Exp2-C | no | 前景类 prompt ensemble | class-aware area filtering，score threshold 与 Exp2-B 一致 | 候选 mask 是否需要质量控制 |
 
-## 7. 输出文件结构
+## 7. 先验固定与测试集调参控制
+
+为避免测试集调参或 prompt tuning 泄漏，Exp2-B 和 Exp2-C 的设计遵循以下约束：
+
+```text
+Exp2-B 的 prompt variants 在运行测试集之前确定；
+Exp2-C 的 mask 面积过滤阈值在运行测试集之前确定；
+所有测试图像使用同一组 prompt variants 和同一组过滤阈值；
+不针对单张测试图像、逐图指标或测试集总体指标临时修改 prompt 或阈值。
+```
+
+因此，Exp2-B 应被解释为“基于类别语义的视觉化 prompt ensemble 消融”，而不是在测试集上搜索最优 prompt 组合；Exp2-C 应被解释为“基于类别尺度先验的固定面积过滤消融”，而不是在测试集上搜索最优后处理阈值。
+
+这一点在论文中可以表述为：
+
+```text
+To avoid test-set-specific prompt or threshold tuning, all prompt variants and mask area thresholds were defined a priori according to the semantic meanings and typical spatial scales of the Potsdam classes, and were kept fixed for all test images.
+```
+
+中文可写为：
+
+```text
+为避免针对测试集进行 prompt 或阈值调参，所有 prompt 变体和 mask 面积阈值均依据 Potsdam 类别语义及典型空间尺度在实验前预先设定，并在全部测试图像上保持固定。
+```
+
+## 8. 输出文件结构
 
 每个 Exp2 实验会保存：
 
@@ -348,8 +385,9 @@ results_exp2*/logs/
 ```text
 metrics/overall_metrics.json
 metrics/per_image_metrics.csv
-metrics/dataset_confusion_matrix.csv
 metrics/experiment_metadata.json
+metrics/config_snapshot.yaml
+metrics/run_context.json
 ```
 
 其中：
@@ -358,10 +396,13 @@ metrics/experiment_metadata.json
 |---|---|
 | `overall_metrics.json` | 数据集级指标、逐图平均指标、实验元数据 |
 | `per_image_metrics.csv` | 每张图的 OA、mIoU、F1、precision、recall、FWIoU |
-| `dataset_confusion_matrix.csv` | 数据集累计混淆矩阵 |
 | `experiment_metadata.json` | 当前实验的 prompt 设置、fallback 类别、过滤规则等 |
+| `config_snapshot.yaml` | 本次运行使用的 YAML 配置快照 |
+| `run_context.json` | 本次运行的样本清单、成功样本、跳过样本、失败样本和指标统计范围 |
 
-## 8. 指标解读
+每张图还会在 `metrics/` 下保存对应的单图指标 JSON。若 `metrics.save_confusion_matrix: true`，会额外保存 `metrics/dataset_confusion_matrix.csv`。若 `output.save_predictions` 或 `output.save_visualizations` 为 `false`，对应的预测图或可视化图不会生成，但目录仍会创建。
+
+## 9. 指标解读
 
 论文主结果建议优先使用 `dataset_*` 指标。
 
@@ -392,38 +433,47 @@ mask filtering 是否减少噪声并提高 precision；
 FWIoU 与 mIoU 是否出现方向不一致。
 ```
 
-## 9. 推荐运行顺序
+## 10. 推荐运行顺序
 
 建议按以下顺序运行：
 
 ```bash
-.venv_hf/bin/python exp2a_sam3_potsdam_no_background_prompt.py --dry-run
 .venv_hf/bin/python exp2a_sam3_potsdam_no_background_prompt.py
 
-.venv_hf/bin/python exp2b_sam3_potsdam_visual_prompt_ensemble.py --dry-run
 .venv_hf/bin/python exp2b_sam3_potsdam_visual_prompt_ensemble.py
 
-.venv_hf/bin/python exp2c_sam3_potsdam_prompt_ensemble_mask_filter.py --dry-run
 .venv_hf/bin/python exp2c_sam3_potsdam_prompt_ensemble_mask_filter.py
 ```
 
 其中 Exp2-B 和 Exp2-C 的计算量明显大于 Exp2-A。
 
-## 10. 论文表述建议
+正式运行前应确认：
+
+```text
+model.allow_hf_fallback: false
+device.type: cuda
+evaluation.test_images: []  # 论文主实验默认运行全部可配对样本
+```
+
+如果 SAM3 模块不可用，脚本会直接抛出 `RuntimeError` 并输出 Python 可执行文件、当前工作目录、SAM3 导入错误和 sys.path 诊断信息；不会以成功状态静默结束。
+
+## 11. 论文表述建议
 
 英文表述可写为：
 
 ```text
 To analyze the influence of reasoning strategies in open-vocabulary remote-sensing segmentation, we design a series of prompt ablation experiments on the Potsdam dataset. Exp2-A removes the active clutter/background prompt and treats background as a residual fallback class. Exp2-B further replaces single foreground prompts with visual prompt ensembles. Exp2-C adds class-aware mask area filtering while keeping the same confidence threshold as Exp2-B, so that the effect of mask filtering can be isolated. All experiments use the same RGB inputs, noBoundary labels, patching strategy, confidence-based fusion, and dataset-level evaluation protocol.
+The prompt variants and mask area thresholds are defined a priori according to class semantics and typical object scales, and are kept fixed for all test images to avoid test-set-specific prompt or threshold tuning.
 ```
 
 中文表述可写为：
 
 ```text
 为分析开放词汇模型在遥感语义分割中的推理策略影响，本文在 Potsdam 数据集上设计了 Exp2 系列 prompt 消融实验。Exp2-A 去除主动背景 prompt，将 clutter/background 仅作为 residual fallback 类别；Exp2-B 在此基础上使用前景类别的视觉化 prompt ensemble；Exp2-C 在保持与 Exp2-B 相同置信度阈值的前提下，进一步加入类别感知的 mask 面积过滤，从而单独分析候选 mask 质量控制的影响。所有实验保持 RGB 输入、noBoundary 标签、切片策略、置信度融合和数据集级评价协议一致。
+为避免针对测试集进行 prompt 或阈值调参，所有 prompt 变体和 mask 面积阈值均依据类别语义和典型目标尺度预先设定，并在全部测试图像上保持固定。
 ```
 
-## 11. 在论文主线中的意义
+## 12. 在论文主线中的意义
 
 Exp2 系列服务于本文“遥感/水利推理分割技术体系”的要素分析。
 

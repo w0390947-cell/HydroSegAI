@@ -4,7 +4,7 @@ Potsdam/
 # 模型输出和实验日志
 outputs/
 results/
-results_exp*/
+results_*/
 runs/
 wandb/
 logs/
